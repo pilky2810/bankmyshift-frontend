@@ -1152,6 +1152,69 @@ function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancel
   );
 }
 
+/* ---------------------------------- CHANGE PASSWORD ---------------------------------- */
+
+function ChangePasswordModal({ onClose, onSubmit }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (newPassword.length < 8) { setError("New password must be at least 8 characters."); return; }
+    if (newPassword !== confirmPassword) { setError("New passwords don't match."); return; }
+    setError(""); setBusy(true);
+    try {
+      await onSubmit(currentPassword, newPassword);
+      setDone(true);
+    } catch (err) {
+      setError(err.message || "Couldn't update your password.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title="Change password" onClose={onClose}>
+      {done ? (
+        <div className="text-center space-y-3">
+          <div className="w-11 h-11 rounded-full flex items-center justify-center mx-auto" style={{ backgroundColor: C.sageTint }}>
+            <CheckCircle2 size={22} color={C.sage} />
+          </div>
+          <p className="text-sm" style={{ color: C.ink }}>Your password has been updated.</p>
+          <Button full onClick={onClose}>Done</Button>
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit} className="space-y-3.5">
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Current password</label>
+            <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className="w-full mt-1 text-sm border rounded-lg px-3 py-2.5" style={{ borderColor: C.border }} autoComplete="current-password" />
+          </div>
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>New password</label>
+            <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 8 characters" className="w-full mt-1 text-sm border rounded-lg px-3 py-2.5" style={{ borderColor: C.border }} autoComplete="new-password" />
+          </div>
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Confirm new password</label>
+            <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full mt-1 text-sm border rounded-lg px-3 py-2.5" style={{ borderColor: C.border }} autoComplete="new-password" />
+          </div>
+
+          {error && (
+            <div className="flex items-center gap-1.5 text-xs p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+              <AlertCircle size={13} /> {error}
+            </div>
+          )}
+
+          <Button full icon={ShieldCheck} disabled={busy} onClick={handleSubmit}>{busy ? "Updating…" : "Update password"}</Button>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
 /* ---------------------------------- ROOT APP ---------------------------------- */
 
 export default function App() {
@@ -1167,6 +1230,7 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [loadError, setLoadError] = useState("");
   const [loadingData, setLoadingData] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
 
   const flash = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2400); };
   const logActivity = (text) => setActivity((a) => [{ id: nextId("a"), text, time: "just now" }, ...a].slice(0, 20));
@@ -1220,6 +1284,10 @@ export default function App() {
 
   const handleResetPassword = async (email, code, newPassword) => {
     await apiRequest("/auth/reset-password", { method: "POST", body: { email, code, newPassword } });
+  };
+
+  const handleChangePassword = async (currentPassword, newPassword) => {
+    await apiRequest("/auth/change-password", { method: "POST", token, body: { currentPassword, newPassword } });
   };
 
   const handleLogout = () => {
@@ -1362,6 +1430,9 @@ export default function App() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs text-white/80 hidden sm:inline">{displayName}</span>
+          <button onClick={() => setShowChangePassword(true)} className="flex items-center gap-1.5 text-xs font-medium text-white/80 hover:text-white bg-white/10 px-3 py-1.5 rounded-full">
+            <Lock size={13} /> Change password
+          </button>
           <button onClick={handleLogout} className="flex items-center gap-1.5 text-xs font-medium text-white/80 hover:text-white bg-white/10 px-3 py-1.5 rounded-full">
             <LogOut size={13} /> Sign out
           </button>
@@ -1382,6 +1453,13 @@ export default function App() {
           <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} />
         )}
       </div>
+
+      {showChangePassword && (
+        <ChangePasswordModal
+          onClose={() => setShowChangePassword(false)}
+          onSubmit={handleChangePassword}
+        />
+      )}
     </div>
   );
 }
