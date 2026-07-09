@@ -1082,10 +1082,141 @@ function ManagerApprovalsPage({ shifts, staff, onDecide }) {
   );
 }
 
-function ManagerStaffPage({ staff, onToggleApproval }) {
+function NewStaffModal({ onClose, onCreate }) {
+  const [form, setForm] = useState({
+    firstName: "", lastName: "", email: "", phone: "", jobRole: "Support Worker",
+    temporaryPassword: "", skills: [], approveImmediately: false,
+  });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [created, setCreated] = useState(null); // { email, password }
+
+  const toggleSkill = (s) => setForm((f) => ({ ...f, skills: f.skills.includes(s) ? f.skills.filter((x) => x !== s) : [...f.skills, s] }));
+
+  const generatePassword = () => {
+    const words = ["Harbor", "Falcon", "Meadow", "Cobalt", "Ridge", "Amber", "Willow", "Granite", "Compass", "Marble", "Cedar", "Heron", "Otter", "Birch"];
+    let w1 = words[Math.floor(Math.random() * words.length)];
+    let w2 = words[Math.floor(Math.random() * words.length)];
+    while (w2 === w1) w2 = words[Math.floor(Math.random() * words.length)];
+    const n = Math.floor(1000 + Math.random() * 9000);
+    setForm((f) => ({ ...f, temporaryPassword: `${w1}-${w2}-${n}!` }));
+  };
+
+  const handleSubmit = async () => {
+    setError("");
+    if (!form.firstName || !form.lastName || !form.email) {
+      setError("First name, last name, and email are required.");
+      return;
+    }
+    if (form.temporaryPassword.length < 8) {
+      setError("Temporary password must be at least 8 characters — use Generate if unsure.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await onCreate(form);
+      setCreated({ email: form.email, password: form.temporaryPassword });
+    } catch (err) {
+      setError(err.message || "Couldn't create this staff member.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (created) {
+    return (
+      <Modal title="Staff account created" onClose={onClose}>
+        <div className="text-center space-y-3">
+          <div className="w-11 h-11 rounded-full flex items-center justify-center mx-auto" style={{ backgroundColor: C.sageTint }}>
+            <CheckCircle2 size={22} color={C.sage} />
+          </div>
+          <p className="text-sm" style={{ color: C.ink }}>Share these sign-in details with them directly — they aren't emailed automatically.</p>
+          <div className="bg-white border rounded-lg p-3 text-left" style={{ borderColor: C.border }}>
+            <div className="text-xs" style={{ color: C.slate }}>Email</div>
+            <div className="text-sm f-mono" style={{ color: C.ink }}>{created.email}</div>
+            <div className="text-xs mt-2" style={{ color: C.slate }}>Temporary password</div>
+            <div className="text-sm f-mono" style={{ color: C.ink }}>{created.password}</div>
+          </div>
+          <Button full onClick={onClose}>Done</Button>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Add staff member" onClose={onClose} wide>
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>First name</label>
+            <input value={form.firstName} onChange={(e) => setForm({ ...form, firstName: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+          </div>
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Last name</label>
+            <input value={form.lastName} onChange={(e) => setForm({ ...form, lastName: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Email address</label>
+          <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Phone</label>
+            <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+          </div>
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Job role</label>
+            <input value={form.jobRole} onChange={(e) => setForm({ ...form, jobRole: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Temporary password</label>
+          <div className="flex gap-2 mt-1">
+            <input value={form.temporaryPassword} onChange={(e) => setForm({ ...form, temporaryPassword: e.target.value })} placeholder="At least 8 characters" className="flex-1 text-sm border rounded-md px-2 py-1.5 f-mono" style={{ borderColor: C.border }} />
+            <Button variant="secondary" size="sm" onClick={generatePassword}>Generate</Button>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Training already held</label>
+          <div className="flex flex-wrap gap-1.5 mt-1.5">
+            {SKILLS.map((s) => (
+              <button key={s} type="button" onClick={() => toggleSkill(s)} className="text-xs px-2.5 py-1 rounded-full font-medium border" style={{ borderColor: form.skills.includes(s) ? C.pine : C.border, backgroundColor: form.skills.includes(s) ? C.pineTint : "white", color: form.skills.includes(s) ? C.pine : C.slate }}>
+                {SKILL_LABEL[s]}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label className="flex items-center gap-2 text-sm pt-1" style={{ color: C.ink }}>
+          <input type="checkbox" checked={form.approveImmediately} onChange={(e) => setForm({ ...form, approveImmediately: e.target.checked })} />
+          Approve for bank shifts immediately
+        </label>
+
+        {error && (
+          <div className="flex items-center gap-1.5 text-xs p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+            <AlertCircle size={13} /> {error}
+          </div>
+        )}
+
+        <Button full icon={PlusCircle} disabled={busy} onClick={handleSubmit}>{busy ? "Creating…" : "Create staff account"}</Button>
+      </div>
+    </Modal>
+  );
+}
+
+function ManagerStaffPage({ staff, onToggleApproval, onAddStaff }) {
+  const [showNew, setShowNew] = useState(false);
   return (
     <div className="space-y-4">
-      <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Staff directory</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Staff directory</h1>
+        <Button icon={PlusCircle} onClick={() => setShowNew(true)} size="sm">Add staff</Button>
+      </div>
       <div className="space-y-3">
         {staff.map((s) => (
           <div key={s.id} className="bg-white rounded-xl border p-4" style={{ borderColor: C.border }}>
@@ -1110,14 +1241,17 @@ function ManagerStaffPage({ staff, onToggleApproval }) {
             </button>
           </div>
         ))}
+        {staff.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No staff yet — add your first one above.</div>}
       </div>
+
+      {showNew && <NewStaffModal onClose={() => setShowNew(false)} onCreate={onAddStaff} />}
     </div>
   );
 }
 
 /* ---------------------------------- MANAGER APP SHELL ---------------------------------- */
 
-function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onDecide, onToggleApproval }) {
+function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onDecide, onToggleApproval, onAddStaff }) {
   const [tab, setTab] = useState("dashboard");
   const [showNew, setShowNew] = useState(false);
   const pendingCount = shifts.filter((s) => s.status === "pending").length;
@@ -1144,7 +1278,7 @@ function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancel
         {tab === "dashboard" && <ManagerDashboard shifts={shifts} staff={staff} activity={activity} managerName={managerName} goShifts={() => setTab("shifts")} goApprovals={() => setTab("approvals")} />}
         {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} />}
         {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} />}
-        {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} />}
+        {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} />}
       </div>
 
       {showNew && <NewShiftModal onClose={() => setShowNew(false)} onCreate={(data) => { onNewShift(data); setShowNew(false); }} />}
@@ -1380,6 +1514,40 @@ export default function App() {
     }
   };
 
+  const handleAddStaff = async (data) => {
+    const created = await apiRequest("/staff", {
+      method: "POST",
+      token,
+      body: {
+        firstName: data.firstName,
+        lastName: data.lastName,
+        email: data.email,
+        phone: data.phone || undefined,
+        jobRole: data.jobRole || undefined,
+        temporaryPassword: data.temporaryPassword,
+      },
+    });
+
+    for (const skill of data.skills) {
+      await apiRequest(`/staff/${created.id}/training`, {
+        method: "POST",
+        token,
+        body: { trainingType: skill },
+      });
+    }
+
+    if (data.approveImmediately) {
+      await apiRequest(`/staff/${created.id}/approval`, {
+        method: "PATCH",
+        token,
+        body: { bankApproved: true },
+      });
+    }
+
+    await refreshStaffDirectory();
+    logActivity(`You added ${data.firstName} ${data.lastName} as a new staff member.`);
+  };
+
   const handleToggleApproval = async (id) => {
     const target = staff.find((s) => s.id === id);
     if (!target) return;
@@ -1450,7 +1618,7 @@ export default function App() {
           <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onRead={handleRead} />
         )}
         {!loadingData && (currentUser.role === "manager" || currentUser.role === "admin") && (
-          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} />
+          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} />
         )}
       </div>
 
