@@ -1,0 +1,1387 @@
+import React, { useState, useMemo } from "react";
+import {
+  Calendar, Clock, MapPin, Filter, Bell, User, CheckCircle2, XCircle,
+  PlusCircle, AlertTriangle, ChevronRight, Search, ShieldCheck, ShieldAlert,
+  LogIn, LogOut, X, Users, LayoutDashboard, ClipboardList, CalendarClock,
+  BadgeCheck, Ban, ChevronDown, Activity, MapPinned, Lock, Mail, Eye, EyeOff,
+  AlertCircle
+} from "lucide-react";
+
+/* ---------------------------------- THEME ---------------------------------- */
+
+const C = {
+  pine: "#17423B",
+  pineDeep: "#0F2E29",
+  pineTint: "#E7EFEC",
+  mist: "#F5F8F6",
+  amber: "#DE9F3D",
+  amberTint: "#FBF0DC",
+  sage: "#4C8B6D",
+  sageTint: "#E7F2EC",
+  clay: "#C15A4C",
+  clayTint: "#F7E7E4",
+  slate: "#5B6D66",
+  ink: "#1C2622",
+  border: "#E1E8E4",
+  surface: "#FFFFFF",
+};
+
+const FONTS = (
+  <style>{`
+    @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+    .f-display { font-family: 'Fraunces', serif; }
+    .f-mono { font-family: 'IBM Plex Mono', monospace; letter-spacing: -0.01em; }
+    * { font-family: 'Inter', system-ui, sans-serif; }
+    .scrollbar-none::-webkit-scrollbar { display: none; }
+  `}</style>
+);
+
+/* ---------------------------------- API CONFIG ---------------------------------- */
+
+// TODO: set this to your deployed backend URL once it's live, e.g.
+// "https://bankmyshift-api.onrender.com" (no trailing slash). Until then the
+// app shows a "backend not configured" screen instead of trying to call it.
+const API_BASE_URL = "https://bankmyshift-api.onrender.com";
+
+const API_NOT_CONFIGURED = API_BASE_URL.includes("REPLACE-WITH");
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// Thin fetch wrapper: attaches the bearer token, serialises JSON, and turns
+// non-2xx responses / network failures into a single ApiError with a
+// human-readable message pulled from the API's { error } body.
+async function apiRequest(path, { method = "GET", token, body } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let res;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (err) {
+    throw new ApiError("Couldn't reach the server. Check your connection and try again.", 0);
+  }
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    // no/invalid JSON body — leave data null
+  }
+
+  if (!res.ok) {
+    throw new ApiError((data && data.error) || "Something went wrong. Please try again.", res.status);
+  }
+  return data;
+}
+
+/* ---------------------------------- STATIC REFERENCE DATA ---------------------------------- */
+
+const SKILLS = ["manual-handling", "medication", "safeguarding", "first-aid"];
+const SKILL_LABEL = {
+  "manual-handling": "Moving & Handling",
+  medication: "Medication Admin",
+  safeguarding: "Safeguarding L2",
+  "first-aid": "First Aid",
+};
+
+let idCounter = 100;
+const nextId = (prefix) => `${prefix}-${idCounter++}`;
+
+/* ---------------------------------- HELPERS ---------------------------------- */
+
+const toMinutes = (t) => {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+};
+
+const overlaps = (a, b) => {
+  if (a.date !== b.date) return false;
+  const aS = toMinutes(a.start), aE = toMinutes(a.end) || 24 * 60;
+  const bS = toMinutes(b.start), bE = toMinutes(b.end) || 24 * 60;
+  return aS < bE && bS < aE;
+};
+
+const formatDate = (d) => {
+  const date = new Date(d + "T00:00:00");
+  return date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+};
+
+const formatRelativeTime = (iso) => {
+  if (!iso) return "";
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
+};
+
+const missingSkills = (staff, shift) => shift.requiredSkills.filter((s) => !staff.skills.includes(s));
+
+const STATUS_META = {
+  open: { label: "Open", color: C.amber, tint: C.amberTint },
+  pending: { label: "Awaiting approval", color: C.amber, tint: C.amberTint },
+  confirmed: { label: "Confirmed", color: C.sage, tint: C.sageTint },
+  completed: { label: "Completed", color: C.slate, tint: C.pineTint },
+  cancelled: { label: "Cancelled", color: C.clay, tint: C.clayTint },
+};
+
+/* ----- API <-> UI shape adapters -----
+   The backend returns Postgres column names (snake_case, NUMERIC-as-string,
+   DATE/TIMESTAMPTZ as ISO strings). These normalisers convert each API
+   response into the same shape the UI components expect, so the page/atom
+   components below didn't need to change. */
+
+const EXPIRY_WARNING_DAYS = 60; // "expiring soon" window shown in the staff profile
+
+const normalizeShift = (s) => ({
+  id: s.id,
+  date: (s.date || "").slice(0, 10),
+  start: (s.start_time || "").slice(0, 5),
+  end: (s.end_time || "").slice(0, 5),
+  location: s.location_name,
+  serviceType: s.service_type,
+  payRate: Number(s.pay_rate),
+  requiredSkills: s.required_skills || [],
+  notes: s.notes || "",
+  mileage: s.mileage_note || "",
+  approvalRequired: s.approval_required,
+  status: s.status,
+  claimedBy: s.claimed_by,
+});
+
+const normalizeMe = (profile) => {
+  const training = profile.training || [];
+  const today = new Date();
+  const skills = training
+    .filter((t) => !t.expiry_date || new Date(t.expiry_date) >= today)
+    .map((t) => t.training_type);
+  const expiring = training
+    .filter((t) => {
+      if (!t.expiry_date) return false;
+      const days = (new Date(t.expiry_date) - today) / 86400000;
+      return days >= 0 && days <= EXPIRY_WARNING_DAYS;
+    })
+    .map((t) => t.training_type);
+  return {
+    id: profile.id,
+    name: `${profile.first_name} ${profile.last_name}`,
+    role: profile.job_role || "Staff",
+    phone: profile.phone || "—",
+    email: profile.email,
+    bankApproved: profile.bank_approved,
+    skills,
+    expiring,
+  };
+};
+
+// GET /staff (the directory) doesn't include training_records, so skills/expiring
+// are left empty here — only /staff/me returns them. Worth adding to the API
+// later if the staff directory should show training status per person.
+const normalizeStaffListItem = (u) => ({
+  id: u.id,
+  name: `${u.first_name} ${u.last_name}`,
+  role: u.job_role || "Staff",
+  phone: u.phone || "—",
+  email: u.email,
+  bankApproved: u.bank_approved,
+  skills: [],
+  expiring: [],
+});
+
+const normalizeNotification = (n) => ({
+  id: n.id,
+  staffId: n.user_id,
+  type: n.type,
+  message: n.message,
+  time: formatRelativeTime(n.sent_at),
+  read: !!n.read_at,
+});
+
+/* ---------------------------------- ATOMS ---------------------------------- */
+
+function Pill({ children, color, tint, small }) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full font-medium ${small ? "text-xs px-2 py-0.5" : "text-xs px-2.5 py-1"}`}
+      style={{ color, backgroundColor: tint }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function Button({ children, onClick, variant = "primary", disabled, full, icon: Icon, size = "md" }) {
+  const base = "inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition-all disabled:cursor-not-allowed";
+  const sizes = size === "sm" ? "text-xs px-3 py-1.5" : "text-sm px-4 py-2.5";
+  const styles = {
+    primary: { backgroundColor: disabled ? "#A9BDB6" : C.pine, color: "#fff" },
+    secondary: { backgroundColor: C.surface, color: C.pine, border: `1px solid ${C.pine}` },
+    ghost: { backgroundColor: "transparent", color: C.slate },
+    danger: { backgroundColor: disabled ? "#E8C6C1" : C.clay, color: "#fff" },
+  };
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`${base} ${sizes} ${full ? "w-full" : ""}`}
+      style={styles[variant]}
+    >
+      {Icon && <Icon size={15} />}
+      {children}
+    </button>
+  );
+}
+
+function Modal({ title, onClose, children, wide }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-0 sm:p-4">
+      <div className={`bg-white w-full ${wide ? "sm:max-w-lg" : "sm:max-w-md"} sm:rounded-2xl rounded-t-2xl max-h-[88vh] overflow-y-auto scrollbar-none`}>
+        <div className="flex items-center justify-between px-5 py-4 border-b sticky top-0 bg-white" style={{ borderColor: C.border }}>
+          <h3 className="f-display text-lg font-semibold" style={{ color: C.ink }}>{title}</h3>
+          <button onClick={onClose} className="p-1 rounded-full hover:bg-gray-100">
+            <X size={18} color={C.slate} />
+          </button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Toast({ message, tone = "success" }) {
+  if (!message) return null;
+  const bg = tone === "success" ? C.pine : C.clay;
+  return (
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium text-white animate-pulse-once" style={{ backgroundColor: bg }}>
+      {message}
+    </div>
+  );
+}
+
+/* ---------------------------------- LOGO ---------------------------------- */
+
+function Logo({ size = 22 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M20 3 L34 8.5 V19 C34 27.5 28 33.8 20 37 C12 33.8 6 27.5 6 19 V8.5 L20 3 Z" fill="white" fillOpacity="0.14" stroke="white" strokeWidth="1.6" strokeLinejoin="round" />
+      <circle cx="20" cy="20" r="8.2" stroke="white" strokeWidth="1.6" />
+      <path d="M20 15.2 V20 L23.4 22.6" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/* ---------------------------------- LOGIN ---------------------------------- */
+
+function LoginPage({ onLogin, onForgotPassword, onResetPassword }) {
+  const [step, setStep] = useState("login"); // login | forgot-email | forgot-reset | reset-success
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const [codeInput, setCodeInput] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError(""); setBusy(true);
+    try {
+      await onLogin(email, password);
+    } catch (err) {
+      setError(err.message || "Sign in failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRequestCode = async (e) => {
+    e.preventDefault();
+    setError(""); setBusy(true);
+    try {
+      await onForgotPassword(email);
+      setStep("forgot-reset");
+    } catch (err) {
+      setError(err.message || "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCompleteReset = async (e) => {
+    e.preventDefault();
+    if (newPw.length < 8) { setError("New password must be at least 8 characters."); return; }
+    if (newPw !== confirmPw) { setError("Passwords don't match."); return; }
+    setError(""); setBusy(true);
+    try {
+      await onResetPassword(email, codeInput.trim(), newPw);
+      setStep("reset-success");
+    } catch (err) {
+      setError(err.message || "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const backToLogin = () => {
+    setStep("login"); setError(""); setPassword(""); setCodeInput(""); setNewPw(""); setConfirmPw("");
+  };
+
+  return (
+    <div className="w-full h-screen flex flex-col items-center justify-center px-6" style={{ backgroundColor: C.pine }}>
+      {FONTS}
+      <div className="w-full max-w-sm">
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3" style={{ backgroundColor: C.pineDeep }}>
+            <Logo size={28} />
+          </div>
+          <span className="f-display font-semibold text-white text-2xl">Bank my shift</span>
+          <span className="text-white/60 text-sm mt-1">
+            {step === "login" && "Sign in to manage your bank shifts"}
+            {step === "forgot-email" && "Reset your password"}
+            {step === "forgot-reset" && "Enter the code we emailed you"}
+            {step === "reset-success" && "Password updated"}
+          </span>
+        </div>
+
+        {step === "login" && (
+          <form onSubmit={handleSubmit} className="bg-white rounded-2xl p-5 space-y-3.5">
+            <div>
+              <label className="text-xs font-medium" style={{ color: C.slate }}>Email address</label>
+              <div className="flex items-center gap-2 border rounded-lg px-3 py-2.5 mt-1" style={{ borderColor: C.border }}>
+                <Mail size={15} color={C.slate} />
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.care" className="flex-1 text-sm outline-none" autoComplete="username" />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium" style={{ color: C.slate }}>Password</label>
+                <button type="button" onClick={() => { setStep("forgot-email"); setError(""); }} className="text-xs font-medium" style={{ color: C.pine }}>
+                  Forgot password?
+                </button>
+              </div>
+              <div className="flex items-center gap-2 border rounded-lg px-3 py-2.5 mt-1" style={{ borderColor: C.border }}>
+                <Lock size={15} color={C.slate} />
+                <input type={showPw ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className="flex-1 text-sm outline-none" autoComplete="current-password" />
+                <button type="button" onClick={() => setShowPw((v) => !v)}>
+                  {showPw ? <EyeOff size={15} color={C.slate} /> : <Eye size={15} color={C.slate} />}
+                </button>
+              </div>
+            </div>
+
+            {error && (
+              <div className="flex items-center gap-1.5 text-xs p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+                <AlertCircle size={13} /> {error}
+              </div>
+            )}
+
+            <Button full icon={LogIn} disabled={busy} onClick={handleSubmit}>{busy ? "Signing in…" : "Sign in"}</Button>
+          </form>
+        )}
+
+        {step === "forgot-email" && (
+          <form onSubmit={handleRequestCode} className="bg-white rounded-2xl p-5 space-y-3.5">
+            <p className="text-sm" style={{ color: C.slate }}>Enter the email address on your account and we'll send a reset code.</p>
+            <div>
+              <label className="text-xs font-medium" style={{ color: C.slate }}>Email address</label>
+              <div className="flex items-center gap-2 border rounded-lg px-3 py-2.5 mt-1" style={{ borderColor: C.border }}>
+                <Mail size={15} color={C.slate} />
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.care" className="flex-1 text-sm outline-none" autoComplete="username" />
+              </div>
+            </div>
+
+            {error && (
+              <div className="flex items-center gap-1.5 text-xs p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+                <AlertCircle size={13} /> {error}
+              </div>
+            )}
+
+            <Button full icon={Mail} disabled={busy} onClick={handleRequestCode}>{busy ? "Sending…" : "Send reset code"}</Button>
+            <button type="button" onClick={backToLogin} className="w-full text-center text-xs font-medium py-1" style={{ color: C.slate }}>
+              Back to sign in
+            </button>
+          </form>
+        )}
+
+        {step === "forgot-reset" && (
+          <form onSubmit={handleCompleteReset} className="bg-white rounded-2xl p-5 space-y-3.5">
+            <div className="text-xs p-3 rounded-lg" style={{ backgroundColor: C.pineTint, color: C.pine }}>
+              We've sent a 6-digit code to <strong>{email}</strong> if that address is registered. It expires in 30 minutes.
+            </div>
+
+            <div>
+              <label className="text-xs font-medium" style={{ color: C.slate }}>Reset code</label>
+              <input value={codeInput} onChange={(e) => setCodeInput(e.target.value)} placeholder="6-digit code" className="w-full text-sm border rounded-lg px-3 py-2.5 mt-1 f-mono" style={{ borderColor: C.border }} />
+            </div>
+            <div>
+              <label className="text-xs font-medium" style={{ color: C.slate }}>New password</label>
+              <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="At least 8 characters" className="w-full text-sm border rounded-lg px-3 py-2.5 mt-1" style={{ borderColor: C.border }} autoComplete="new-password" />
+            </div>
+            <div>
+              <label className="text-xs font-medium" style={{ color: C.slate }}>Confirm new password</label>
+              <input type="password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} placeholder="Re-enter new password" className="w-full text-sm border rounded-lg px-3 py-2.5 mt-1" style={{ borderColor: C.border }} autoComplete="new-password" />
+            </div>
+
+            {error && (
+              <div className="flex items-center gap-1.5 text-xs p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+                <AlertCircle size={13} /> {error}
+              </div>
+            )}
+
+            <Button full icon={ShieldCheck} disabled={busy} onClick={handleCompleteReset}>{busy ? "Updating…" : "Set new password"}</Button>
+            <button type="button" onClick={backToLogin} className="w-full text-center text-xs font-medium py-1" style={{ color: C.slate }}>
+              Back to sign in
+            </button>
+          </form>
+        )}
+
+        {step === "reset-success" && (
+          <div className="bg-white rounded-2xl p-5 space-y-3.5 text-center">
+            <div className="w-11 h-11 rounded-full flex items-center justify-center mx-auto" style={{ backgroundColor: C.sageTint }}>
+              <CheckCircle2 size={22} color={C.sage} />
+            </div>
+            <p className="text-sm" style={{ color: C.ink }}>Your password has been updated. Sign in with your new password.</p>
+            <Button full icon={LogIn} onClick={backToLogin}>Back to sign in</Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- SHIFT CARD ---------------------------------- */
+
+function ShiftCard({ shift, me, onOpen, compact }) {
+  const meta = STATUS_META[shift.status];
+  const missing = missingSkills(me, shift);
+  return (
+    <button
+      onClick={() => onOpen(shift)}
+      className="w-full text-left bg-white rounded-xl border overflow-hidden flex hover:shadow-md transition-shadow"
+      style={{ borderColor: C.border }}
+    >
+      <div className="w-1.5" style={{ backgroundColor: meta.color }} />
+      <div className="flex-1 p-4">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <div className="f-mono text-sm font-semibold" style={{ color: C.ink }}>
+              {formatDate(shift.date)} · {shift.start}–{shift.end}
+            </div>
+            <div className="flex items-center gap-1 mt-1 text-sm" style={{ color: C.slate }}>
+              <MapPin size={13} /> {shift.location}
+            </div>
+          </div>
+          <Pill color={meta.color} tint={meta.tint} small>{meta.label}</Pill>
+        </div>
+
+        <div className="flex items-center justify-between mt-3">
+          <Pill color={C.pine} tint={C.pineTint} small>{shift.serviceType}</Pill>
+          <div className="f-mono text-sm font-semibold" style={{ color: C.pine }}>£{shift.payRate.toFixed(2)}/hr</div>
+        </div>
+
+        {!compact && (
+          <div className="flex flex-wrap gap-1.5 mt-3">
+            {shift.requiredSkills.map((s) => (
+              <Pill key={s} small color={missing.includes(s) ? C.clay : C.sage} tint={missing.includes(s) ? C.clayTint : C.sageTint}>
+                {missing.includes(s) ? <ShieldAlert size={11} className="inline mr-1 -mt-0.5" /> : <ShieldCheck size={11} className="inline mr-1 -mt-0.5" />}
+                {SKILL_LABEL[s] || s}
+              </Pill>
+            ))}
+          </div>
+        )}
+      </div>
+    </button>
+  );
+}
+
+/* ---------------------------------- STAFF: SHIFT DETAIL ---------------------------------- */
+
+function ShiftDetailModal({ shift, me, allShifts, onClose, onClaim, onCancelClaim }) {
+  const meta = STATUS_META[shift.status];
+  const missing = missingSkills(me, shift);
+  const myUpcoming = allShifts.filter((s) => s.claimedBy === me.id && (s.status === "confirmed" || s.status === "pending") && s.id !== shift.id);
+  const conflict = myUpcoming.find((s) => overlaps(s, shift));
+  const isMine = shift.claimedBy === me.id;
+  const canClaim = shift.status === "open" && missing.length === 0 && !conflict && me.bankApproved;
+
+  return (
+    <Modal title="Shift details" onClose={onClose}>
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="f-mono text-base font-semibold" style={{ color: C.ink }}>
+            {formatDate(shift.date)} · {shift.start}–{shift.end}
+          </div>
+          <Pill color={meta.color} tint={meta.tint}>{meta.label}</Pill>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div>
+            <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Location</div>
+            <div style={{ color: C.ink }}>{shift.location}</div>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Service type</div>
+            <div style={{ color: C.ink }}>{shift.serviceType}</div>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Pay rate</div>
+            <div className="f-mono font-semibold" style={{ color: C.pine }}>£{shift.payRate.toFixed(2)}/hr</div>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Approval</div>
+            <div style={{ color: C.ink }}>{shift.approvalRequired ? "Manager approval required" : "Auto-confirmed on claim"}</div>
+          </div>
+        </div>
+
+        {shift.mileage && (
+          <div className="text-sm flex items-start gap-1.5" style={{ color: C.slate }}>
+            <MapPinned size={14} className="mt-0.5" /> {shift.mileage}
+          </div>
+        )}
+
+        {shift.notes && (
+          <div className="text-sm p-3 rounded-lg" style={{ backgroundColor: C.mist, color: C.ink }}>
+            {shift.notes}
+          </div>
+        )}
+
+        <div>
+          <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: C.slate }}>Required training</div>
+          <div className="flex flex-wrap gap-1.5">
+            {shift.requiredSkills.length === 0 && <span className="text-sm" style={{ color: C.slate }}>None specified</span>}
+            {shift.requiredSkills.map((s) => (
+              <Pill key={s} small color={missing.includes(s) ? C.clay : C.sage} tint={missing.includes(s) ? C.clayTint : C.sageTint}>
+                {missing.includes(s) ? <ShieldAlert size={11} className="inline mr-1 -mt-0.5" /> : <ShieldCheck size={11} className="inline mr-1 -mt-0.5" />}
+                {SKILL_LABEL[s] || s}
+              </Pill>
+            ))}
+          </div>
+        </div>
+
+        {missing.length > 0 && shift.status === "open" && (
+          <div className="flex items-start gap-2 text-sm p-3 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+            <ShieldAlert size={16} className="mt-0.5 shrink-0" />
+            You're missing {missing.map((s) => SKILL_LABEL[s] || s).join(", ")}. Update your certificates before you can claim this shift.
+          </div>
+        )}
+        {conflict && shift.status === "open" && (
+          <div className="flex items-start gap-2 text-sm p-3 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+            This overlaps with your shift at {conflict.location} on {formatDate(conflict.date)}.
+          </div>
+        )}
+
+        <div className="pt-2">
+          {isMine && (shift.status === "confirmed" || shift.status === "pending") && (
+            <Button variant="danger" full icon={Ban} onClick={() => onCancelClaim(shift)}>
+              Cancel my claim
+            </Button>
+          )}
+          {!isMine && shift.status === "open" && (
+            <Button variant="primary" full disabled={!canClaim} icon={CheckCircle2} onClick={() => onClaim(shift)}>
+              {shift.approvalRequired ? "Request this shift" : "Claim shift"}
+            </Button>
+          )}
+          {!isMine && shift.status !== "open" && (
+            <div className="text-sm text-center py-2" style={{ color: C.slate }}>This shift is no longer available.</div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------- STAFF PAGES ---------------------------------- */
+
+function StaffShiftsPage({ shifts, me, onOpen }) {
+  const [q, setQ] = useState("");
+  const [location, setLocation] = useState("All");
+  const [service, setService] = useState("All");
+  const [showFilters, setShowFilters] = useState(false);
+
+  const locations = ["All", ...new Set(shifts.map((s) => s.location))];
+  const services = ["All", ...new Set(shifts.map((s) => s.serviceType))];
+
+  const open = shifts.filter((s) => s.status === "open");
+  const filtered = open.filter((s) => {
+    if (location !== "All" && s.location !== location) return false;
+    if (service !== "All" && s.serviceType !== service) return false;
+    if (q && !(`${s.location} ${s.serviceType}`.toLowerCase().includes(q.toLowerCase()))) return false;
+    return true;
+  }).sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Available shifts</h1>
+        <p className="text-sm mt-0.5" style={{ color: C.slate }}>{filtered.length} open shift{filtered.length !== 1 ? "s" : ""} match your role</p>
+      </div>
+
+      <div className="flex gap-2">
+        <div className="flex-1 flex items-center gap-2 bg-white rounded-lg border px-3 py-2" style={{ borderColor: C.border }}>
+          <Search size={15} color={C.slate} />
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search location or service"
+            className="flex-1 text-sm outline-none"
+          />
+        </div>
+        <button
+          onClick={() => setShowFilters((v) => !v)}
+          className="flex items-center gap-1.5 px-3 rounded-lg border text-sm font-medium"
+          style={{ borderColor: C.border, color: C.pine, backgroundColor: showFilters ? C.pineTint : "white" }}
+        >
+          <Filter size={14} /> Filters <ChevronDown size={13} className={showFilters ? "rotate-180 transition-transform" : "transition-transform"} />
+        </button>
+      </div>
+
+      {showFilters && (
+        <div className="bg-white border rounded-lg p-3 grid grid-cols-2 gap-3" style={{ borderColor: C.border }}>
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Location</label>
+            <select value={location} onChange={(e) => setLocation(e.target.value)} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }}>
+              {locations.map((l) => <option key={l}>{l}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Service type</label>
+            <select value={service} onChange={(e) => setService(e.target.value)} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }}>
+              {services.map((s) => <option key={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {filtered.map((s) => <ShiftCard key={s.id} shift={s} me={me} onOpen={onOpen} />)}
+        {filtered.length === 0 && (
+          <div className="text-center py-12 text-sm" style={{ color: C.slate }}>
+            No shifts match your filters — try widening the search.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StaffMyShiftsPage({ shifts, me, onOpen }) {
+  const mine = shifts.filter((s) => s.claimedBy === me.id);
+  const upcoming = mine.filter((s) => s.status === "confirmed" || s.status === "pending").sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
+  const past = mine.filter((s) => s.status === "completed" || s.status === "cancelled");
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>My shifts</h1>
+        <p className="text-sm mt-0.5" style={{ color: C.slate }}>Your claimed and past shifts</p>
+      </div>
+
+      <div>
+        <h2 className="text-sm font-semibold mb-2" style={{ color: C.ink }}>Upcoming ({upcoming.length})</h2>
+        <div className="space-y-3">
+          {upcoming.map((s) => <ShiftCard key={s.id} shift={s} me={me} onOpen={onOpen} compact />)}
+          {upcoming.length === 0 && <div className="text-sm py-4" style={{ color: C.slate }}>No upcoming shifts. Browse available shifts to claim one.</div>}
+        </div>
+      </div>
+
+      {past.length > 0 && (
+        <div>
+          <h2 className="text-sm font-semibold mb-2" style={{ color: C.ink }}>History</h2>
+          <div className="space-y-3">
+            {past.map((s) => <ShiftCard key={s.id} shift={s} me={me} onOpen={onOpen} compact />)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StaffNotificationsPage({ notifs, onRead }) {
+  return (
+    <div className="space-y-4">
+      <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Notifications</h1>
+      <div className="space-y-2">
+        {notifs.map((n) => (
+          <button key={n.id} onClick={() => onRead(n.id)} className="w-full text-left flex items-start gap-3 p-3 rounded-lg border bg-white" style={{ borderColor: C.border, opacity: n.read ? 0.6 : 1 }}>
+            <div className="w-2 h-2 rounded-full mt-1.5 shrink-0" style={{ backgroundColor: n.read ? "transparent" : C.amber }} />
+            <div>
+              <div className="text-sm" style={{ color: C.ink }}>{n.message}</div>
+              <div className="text-xs mt-0.5" style={{ color: C.slate }}>{n.time}</div>
+            </div>
+          </button>
+        ))}
+        {notifs.length === 0 && <div className="text-sm py-8 text-center" style={{ color: C.slate }}>You're all caught up.</div>}
+      </div>
+    </div>
+  );
+}
+
+function StaffProfilePage({ me }) {
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center gap-3">
+        <div className="w-14 h-14 rounded-full flex items-center justify-center f-display text-lg font-semibold text-white" style={{ backgroundColor: C.pine }}>
+          {me.name.split(" ").map((n) => n[0]).join("")}
+        </div>
+        <div>
+          <div className="f-display text-lg font-semibold" style={{ color: C.ink }}>{me.name}</div>
+          <div className="text-sm" style={{ color: C.slate }}>{me.role}</div>
+        </div>
+      </div>
+
+      <Pill color={me.bankApproved ? C.sage : C.clay} tint={me.bankApproved ? C.sageTint : C.clayTint}>
+        {me.bankApproved ? "Approved for bank shifts" : "Bank approval pending"}
+      </Pill>
+
+      <div className="bg-white rounded-lg border divide-y" style={{ borderColor: C.border }}>
+        <div className="p-3 flex justify-between text-sm"><span style={{ color: C.slate }}>Phone</span><span style={{ color: C.ink }}>{me.phone}</span></div>
+        <div className="p-3 flex justify-between text-sm"><span style={{ color: C.slate }}>Email</span><span style={{ color: C.ink }}>{me.email}</span></div>
+      </div>
+
+      <div>
+        <h2 className="text-sm font-semibold mb-2" style={{ color: C.ink }}>Training & compliance</h2>
+        <div className="space-y-2">
+          {SKILLS.map((s) => {
+            const has = me.skills.includes(s);
+            const expiring = me.expiring.includes(s);
+            const color = !has ? C.clay : expiring ? C.amber : C.sage;
+            const tint = !has ? C.clayTint : expiring ? C.amberTint : C.sageTint;
+            const label = !has ? "Not held" : expiring ? "Expiring soon" : "Valid";
+            return (
+              <div key={s} className="flex items-center justify-between bg-white p-3 rounded-lg border" style={{ borderColor: C.border }}>
+                <span className="text-sm" style={{ color: C.ink }}>{SKILL_LABEL[s]}</span>
+                <Pill small color={color} tint={tint}>{label}</Pill>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- STAFF APP SHELL ---------------------------------- */
+
+function StaffApp({ shifts, me, notifs, onClaim, onCancelClaim, onRead }) {
+  const [tab, setTab] = useState("shifts");
+  const [openShift, setOpenShift] = useState(null);
+  const unread = notifs.filter((n) => !n.read).length;
+
+  const TABS = [
+    { id: "shifts", label: "Shifts", icon: Calendar },
+    { id: "mine", label: "My shifts", icon: ClipboardList },
+    { id: "notifs", label: "Alerts", icon: Bell, badge: unread },
+    { id: "profile", label: "Profile", icon: User },
+  ];
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex-1 overflow-y-auto scrollbar-none px-4 pt-4 pb-24">
+        {tab === "shifts" && <StaffShiftsPage shifts={shifts} me={me} onOpen={setOpenShift} />}
+        {tab === "mine" && <StaffMyShiftsPage shifts={shifts} me={me} onOpen={setOpenShift} />}
+        {tab === "notifs" && <StaffNotificationsPage notifs={notifs} onRead={onRead} />}
+        {tab === "profile" && <StaffProfilePage me={me} />}
+      </div>
+
+      <div className="border-t bg-white flex justify-around py-2 absolute bottom-0 left-0 right-0" style={{ borderColor: C.border }}>
+        {TABS.map((t) => (
+          <button key={t.id} onClick={() => setTab(t.id)} className="flex flex-col items-center gap-0.5 px-3 py-1 relative">
+            <t.icon size={19} color={tab === t.id ? C.pine : C.slate} />
+            {t.badge > 0 && <span className="absolute top-0 right-1 w-3.5 h-3.5 rounded-full text-[9px] text-white flex items-center justify-center" style={{ backgroundColor: C.clay }}>{t.badge}</span>}
+            <span className="text-[10px] font-medium" style={{ color: tab === t.id ? C.pine : C.slate }}>{t.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {openShift && (
+        <ShiftDetailModal
+          shift={shifts.find((s) => s.id === openShift.id) || openShift}
+          me={me}
+          allShifts={shifts}
+          onClose={() => setOpenShift(null)}
+          onClaim={(s) => { onClaim(s); setOpenShift(null); }}
+          onCancelClaim={(s) => { onCancelClaim(s); setOpenShift(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- MANAGER: NEW SHIFT MODAL ---------------------------------- */
+
+function NewShiftModal({ onClose, onCreate }) {
+  const [form, setForm] = useState({
+    date: "2026-07-20", start: "07:00", end: "14:30", location: "Willowbrook House",
+    serviceType: "Residential Care", payRate: "14.50", requiredSkills: [], notes: "", mileage: "", approvalRequired: false,
+  });
+  const toggleSkill = (s) => setForm((f) => ({ ...f, requiredSkills: f.requiredSkills.includes(s) ? f.requiredSkills.filter((x) => x !== s) : [...f.requiredSkills, s] }));
+
+  return (
+    <Modal title="Upload a new shift" onClose={onClose} wide>
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Date</label>
+            <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+          </div>
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label className="text-xs font-medium" style={{ color: C.slate }}>Start</label>
+              <input type="time" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-medium" style={{ color: C.slate }}>End</label>
+              <input type="time" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Location / service</label>
+          <input value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Service type</label>
+            <select value={form.serviceType} onChange={(e) => setForm({ ...form, serviceType: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }}>
+              {["Residential Care", "Domiciliary Care", "Dementia Care", "Respite Care"].map((s) => <option key={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Pay rate (£/hr)</label>
+            <input value={form.payRate} onChange={(e) => setForm({ ...form, payRate: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5 f-mono" style={{ borderColor: C.border }} />
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Required training</label>
+          <div className="flex flex-wrap gap-1.5 mt-1.5">
+            {SKILLS.map((s) => (
+              <button key={s} onClick={() => toggleSkill(s)} className="text-xs px-2.5 py-1 rounded-full font-medium border" style={{ borderColor: form.requiredSkills.includes(s) ? C.pine : C.border, backgroundColor: form.requiredSkills.includes(s) ? C.pineTint : "white", color: form.requiredSkills.includes(s) ? C.pine : C.slate }}>
+                {SKILL_LABEL[s]}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Shift notes</label>
+          <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+        </div>
+
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Mileage / travel note (optional)</label>
+          <input value={form.mileage} onChange={(e) => setForm({ ...form, mileage: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+        </div>
+
+        <label className="flex items-center gap-2 text-sm pt-1" style={{ color: C.ink }}>
+          <input type="checkbox" checked={form.approvalRequired} onChange={(e) => setForm({ ...form, approvalRequired: e.target.checked })} />
+          Require manager approval before this shift is confirmed
+        </label>
+
+        <Button full icon={PlusCircle} onClick={() => onCreate({ ...form, payRate: parseFloat(form.payRate) || 0 })}>
+          Publish shift
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------- MANAGER PAGES ---------------------------------- */
+
+function CoverageMeter({ shifts }) {
+  const total = shifts.filter((s) => s.status !== "cancelled").length || 1;
+  const confirmed = shifts.filter((s) => s.status === "confirmed" || s.status === "completed").length;
+  const pending = shifts.filter((s) => s.status === "pending").length;
+  const open = shifts.filter((s) => s.status === "open").length;
+  return (
+    <div>
+      <div className="flex h-2.5 rounded-full overflow-hidden" style={{ backgroundColor: C.border }}>
+        <div style={{ width: `${(confirmed / total) * 100}%`, backgroundColor: C.sage }} />
+        <div style={{ width: `${(pending / total) * 100}%`, backgroundColor: C.amber }} />
+        <div style={{ width: `${(open / total) * 100}%`, backgroundColor: C.clay }} />
+      </div>
+      <div className="flex gap-4 mt-2 text-xs" style={{ color: C.slate }}>
+        <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ backgroundColor: C.sage }} />Filled ({confirmed})</span>
+        <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ backgroundColor: C.amber }} />Pending ({pending})</span>
+        <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ backgroundColor: C.clay }} />Unfilled ({open})</span>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, color }) {
+  return (
+    <div className="bg-white rounded-xl border p-4" style={{ borderColor: C.border }}>
+      <div className="f-mono text-2xl font-semibold" style={{ color: color || C.ink }}>{value}</div>
+      <div className="text-xs mt-1" style={{ color: C.slate }}>{label}</div>
+    </div>
+  );
+}
+
+function ManagerDashboard({ shifts, staff, activity, managerName, goShifts, goApprovals }) {
+  const open = shifts.filter((s) => s.status === "open");
+  const confirmed = shifts.filter((s) => s.status === "confirmed");
+  const pending = shifts.filter((s) => s.status === "pending");
+  const now = new Date();
+  const urgent = open.filter((s) => new Date(s.date) - now < 1000 * 60 * 60 * 24 * 3);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Good afternoon, {managerName ? managerName.split(" ")[0] : "there"}</h1>
+        <p className="text-sm mt-0.5" style={{ color: C.slate }}>Here's how bank shift coverage looks right now.</p>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <StatCard label="Open shifts" value={open.length} color={C.clay} />
+        <StatCard label="Confirmed" value={confirmed.length} color={C.sage} />
+        <StatCard label="Pending approvals" value={pending.length} color={C.amber} />
+        <StatCard label="Staff on file" value={staff.length} />
+      </div>
+
+      <div className="bg-white rounded-xl border p-4" style={{ borderColor: C.border }}>
+        <h2 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Coverage this fortnight</h2>
+        <CoverageMeter shifts={shifts} />
+      </div>
+
+      {pending.length > 0 && (
+        <button onClick={goApprovals} className="w-full flex items-center justify-between bg-white rounded-xl border p-4 hover:shadow-md" style={{ borderColor: C.border }}>
+          <div className="flex items-center gap-2 text-sm font-medium" style={{ color: C.ink }}>
+            <AlertTriangle size={16} color={C.amber} /> {pending.length} shift request{pending.length !== 1 ? "s" : ""} waiting for your approval
+          </div>
+          <ChevronRight size={16} color={C.slate} />
+        </button>
+      )}
+
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold" style={{ color: C.ink }}>Unfilled &amp; urgent (next 3 days)</h2>
+          <button onClick={goShifts} className="text-xs font-medium" style={{ color: C.pine }}>View all shifts</button>
+        </div>
+        <div className="space-y-3">
+          {urgent.map((s) => <ShiftCard key={s.id} shift={s} me={{ skills: SKILLS, id: "manager" }} onOpen={() => {}} compact />)}
+          {urgent.length === 0 && <div className="text-sm py-3" style={{ color: C.slate }}>No urgent gaps right now.</div>}
+        </div>
+      </div>
+
+      <div>
+        <h2 className="text-sm font-semibold mb-2" style={{ color: C.ink }}>Recent activity</h2>
+        <div className="bg-white rounded-xl border divide-y" style={{ borderColor: C.border }}>
+          {activity.slice(0, 6).map((a) => (
+            <div key={a.id} className="p-3 flex items-start gap-2 text-sm">
+              <Activity size={14} className="mt-0.5" color={C.slate} />
+              <div style={{ color: C.ink }}>{a.text}<div className="text-xs mt-0.5" style={{ color: C.slate }}>{a.time}</div></div>
+            </div>
+          ))}
+          {activity.length === 0 && (
+            <div className="p-3 text-sm" style={{ color: C.slate }}>
+              No activity yet this session. (The backend logs every action to its audit trail, but doesn't yet expose a feed endpoint — this list only shows what you've done since signing in.)
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ManagerShiftsPage({ shifts, staff, onNew, onCancel }) {
+  const [filter, setFilter] = useState("all");
+  const filtered = filter === "all" ? shifts : shifts.filter((s) => s.status === filter);
+  const staffName = (id) => staff.find((s) => s.id === id)?.name || "—";
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Shifts</h1>
+        <Button icon={PlusCircle} onClick={onNew} size="sm">New shift</Button>
+      </div>
+
+      <div className="flex gap-2 overflow-x-auto scrollbar-none">
+        {["all", "open", "pending", "confirmed", "completed", "cancelled"].map((f) => (
+          <button key={f} onClick={() => setFilter(f)} className="text-xs font-medium px-3 py-1.5 rounded-full border whitespace-nowrap" style={{ borderColor: filter === f ? C.pine : C.border, backgroundColor: filter === f ? C.pineTint : "white", color: filter === f ? C.pine : C.slate }}>
+            {f[0].toUpperCase() + f.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      <div className="space-y-3">
+        {filtered.map((s) => (
+          <div key={s.id} className="bg-white rounded-xl border p-4 flex items-start justify-between gap-3" style={{ borderColor: C.border }}>
+            <div>
+              <div className="f-mono text-sm font-semibold" style={{ color: C.ink }}>{formatDate(s.date)} · {s.start}–{s.end}</div>
+              <div className="text-sm mt-0.5" style={{ color: C.slate }}>{s.location} · {s.serviceType}</div>
+              {s.claimedBy && <div className="text-xs mt-1" style={{ color: C.pine }}>Assigned: {staffName(s.claimedBy)}</div>}
+            </div>
+            <div className="flex flex-col items-end gap-2 shrink-0">
+              <Pill small color={STATUS_META[s.status].color} tint={STATUS_META[s.status].tint}>{STATUS_META[s.status].label}</Pill>
+              {(s.status === "open" || s.status === "confirmed" || s.status === "pending") && (
+                <button onClick={() => onCancel(s)} className="text-xs font-medium" style={{ color: C.clay }}>Cancel</button>
+              )}
+            </div>
+          </div>
+        ))}
+        {filtered.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No shifts in this view.</div>}
+      </div>
+    </div>
+  );
+}
+
+function ManagerApprovalsPage({ shifts, staff, onDecide }) {
+  const pending = shifts.filter((s) => s.status === "pending");
+  const staffOf = (id) => staff.find((s) => s.id === id);
+
+  return (
+    <div className="space-y-4">
+      <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Approvals</h1>
+      <div className="space-y-3">
+        {pending.map((s) => {
+          const st = staffOf(s.claimedBy);
+          const missing = st ? missingSkills(st, s) : [];
+          return (
+            <div key={s.id} className="bg-white rounded-xl border p-4" style={{ borderColor: C.border }}>
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="f-mono text-sm font-semibold" style={{ color: C.ink }}>{formatDate(s.date)} · {s.start}–{s.end}</div>
+                  <div className="text-sm mt-0.5" style={{ color: C.slate }}>{s.location} · {s.serviceType}</div>
+                  <div className="text-sm mt-1.5 font-medium" style={{ color: C.pine }}>Requested by {st?.name || "a staff member"}</div>
+                </div>
+                <div className="f-mono text-sm font-semibold" style={{ color: C.pine }}>£{s.payRate.toFixed(2)}/hr</div>
+              </div>
+              {missing.length > 0 && (
+                <div className="flex items-center gap-1.5 text-xs mt-2 p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+                  <ShieldAlert size={13} /> Missing: {missing.map((m) => SKILL_LABEL[m] || m).join(", ")}
+                </div>
+              )}
+              <div className="flex gap-2 mt-3">
+                <Button size="sm" variant="secondary" icon={XCircle} onClick={() => onDecide(s, "rejected")}>Decline</Button>
+                <Button size="sm" icon={CheckCircle2} onClick={() => onDecide(s, "approved")}>Approve</Button>
+              </div>
+            </div>
+          );
+        })}
+        {pending.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No pending requests.</div>}
+      </div>
+    </div>
+  );
+}
+
+function ManagerStaffPage({ staff, onToggleApproval }) {
+  return (
+    <div className="space-y-4">
+      <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Staff directory</h1>
+      <div className="space-y-3">
+        {staff.map((s) => (
+          <div key={s.id} className="bg-white rounded-xl border p-4" style={{ borderColor: C.border }}>
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="text-sm font-semibold" style={{ color: C.ink }}>{s.name}</div>
+                <div className="text-xs" style={{ color: C.slate }}>{s.role} · {s.phone}</div>
+              </div>
+              <Pill small color={s.bankApproved ? C.sage : C.clay} tint={s.bankApproved ? C.sageTint : C.clayTint}>
+                {s.bankApproved ? "Approved" : "Pending"}
+              </Pill>
+            </div>
+            <div className="flex flex-wrap gap-1.5 mt-2.5">
+              {SKILLS.map((sk) => s.skills.includes(sk) && (
+                <Pill key={sk} small color={s.expiring.includes(sk) ? C.amber : C.sage} tint={s.expiring.includes(sk) ? C.amberTint : C.sageTint}>
+                  {SKILL_LABEL[sk]}{s.expiring.includes(sk) ? " · expiring" : ""}
+                </Pill>
+              ))}
+            </div>
+            <button onClick={() => onToggleApproval(s.id)} className="text-xs font-medium mt-2.5" style={{ color: C.pine }}>
+              {s.bankApproved ? "Suspend bank approval" : "Approve for bank shifts"}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- MANAGER APP SHELL ---------------------------------- */
+
+function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onDecide, onToggleApproval }) {
+  const [tab, setTab] = useState("dashboard");
+  const [showNew, setShowNew] = useState(false);
+  const pendingCount = shifts.filter((s) => s.status === "pending").length;
+
+  const TABS = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "shifts", label: "Shifts", icon: CalendarClock },
+    { id: "approvals", label: "Approvals", icon: BadgeCheck, badge: pendingCount },
+    { id: "staff", label: "Staff", icon: Users },
+  ];
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex gap-1 px-4 pt-3 border-b bg-white overflow-x-auto scrollbar-none" style={{ borderColor: C.border }}>
+        {TABS.map((t) => (
+          <button key={t.id} onClick={() => setTab(t.id)} className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 relative whitespace-nowrap" style={{ borderColor: tab === t.id ? C.pine : "transparent", color: tab === t.id ? C.pine : C.slate }}>
+            <t.icon size={15} /> {t.label}
+            {t.badge > 0 && <span className="ml-1 w-4 h-4 rounded-full text-[9px] text-white flex items-center justify-center" style={{ backgroundColor: C.clay }}>{t.badge}</span>}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto scrollbar-none px-4 pt-4 pb-8">
+        {tab === "dashboard" && <ManagerDashboard shifts={shifts} staff={staff} activity={activity} managerName={managerName} goShifts={() => setTab("shifts")} goApprovals={() => setTab("approvals")} />}
+        {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} />}
+        {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} />}
+        {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} />}
+      </div>
+
+      {showNew && <NewShiftModal onClose={() => setShowNew(false)} onCreate={(data) => { onNewShift(data); setShowNew(false); }} />}
+    </div>
+  );
+}
+
+/* ---------------------------------- ROOT APP ---------------------------------- */
+
+export default function App() {
+  // JWT lives only in React state — never written to localStorage/sessionStorage,
+  // so it disappears on refresh (matches the backend README's storage guidance).
+  const [token, setToken] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null); // { id, role, firstName, lastName, email, bankApproved }
+  const [me, setMe] = useState(null); // normalized /staff/me profile (staff role only)
+  const [shifts, setShifts] = useState([]);
+  const [staff, setStaff] = useState([]);
+  const [notifs, setNotifs] = useState([]);
+  const [activity, setActivity] = useState([]);
+  const [toast, setToast] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [loadingData, setLoadingData] = useState(false);
+
+  const flash = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2400); };
+  const logActivity = (text) => setActivity((a) => [{ id: nextId("a"), text, time: "just now" }, ...a].slice(0, 20));
+
+  const refreshShifts = async (tok = token) => {
+    const data = await apiRequest("/shifts", { token: tok });
+    setShifts(data.map(normalizeShift));
+  };
+  const refreshNotifications = async (tok = token) => {
+    const data = await apiRequest("/notifications", { token: tok });
+    setNotifs(data.map(normalizeNotification));
+  };
+  const refreshStaffDirectory = async (tok = token) => {
+    const data = await apiRequest("/staff", { token: tok });
+    setStaff(data.map(normalizeStaffListItem));
+  };
+  const refreshMe = async (tok = token) => {
+    const data = await apiRequest("/staff/me", { token: tok });
+    setMe(normalizeMe(data));
+  };
+
+  const loadForRole = async (role, tok) => {
+    setLoadingData(true);
+    setLoadError("");
+    try {
+      await refreshShifts(tok);
+      await refreshNotifications(tok);
+      if (role === "manager" || role === "admin") {
+        await refreshStaffDirectory(tok);
+      } else {
+        await refreshMe(tok);
+      }
+    } catch (err) {
+      setLoadError(err.message || "Couldn't load your data.");
+    } finally {
+      setLoadingData(false);
+    }
+  };
+
+  const handleLogin = async (email, password) => {
+    const data = await apiRequest("/auth/login", { method: "POST", body: { email, password } });
+    setToken(data.token);
+    setCurrentUser(data.user);
+    flash(`Welcome back, ${data.user.firstName}`);
+    await loadForRole(data.user.role, data.token);
+  };
+
+  const handleForgotPassword = async (email) => {
+    await apiRequest("/auth/forgot-password", { method: "POST", body: { email } });
+  };
+
+  const handleResetPassword = async (email, code, newPassword) => {
+    await apiRequest("/auth/reset-password", { method: "POST", body: { email, code, newPassword } });
+  };
+
+  const handleLogout = () => {
+    setToken(null);
+    setCurrentUser(null);
+    setMe(null);
+    setShifts([]);
+    setStaff([]);
+    setNotifs([]);
+    setActivity([]);
+  };
+
+  const handleClaim = async (shift) => {
+    try {
+      await apiRequest(`/shifts/${shift.id}/claim`, { method: "POST", token });
+      await refreshShifts();
+      await refreshNotifications();
+      logActivity(`You ${shift.approvalRequired ? "requested" : "claimed"} ${shift.location} on ${formatDate(shift.date)}.`);
+      flash(shift.approvalRequired ? "Request sent — awaiting manager approval" : "Shift confirmed");
+    } catch (err) {
+      flash(err.message || "Couldn't claim this shift.");
+    }
+  };
+
+  const handleCancelClaim = async (shift) => {
+    try {
+      await apiRequest(`/shifts/${shift.id}/cancel-claim`, { method: "POST", token });
+      await refreshShifts();
+      logActivity(`You cancelled your claim on ${shift.location}, ${formatDate(shift.date)}.`);
+      flash("Claim cancelled — shift returned to available list");
+    } catch (err) {
+      flash(err.message || "Couldn't cancel this claim.");
+    }
+  };
+
+  const handleRead = async (id) => {
+    setNotifs((n) => n.map((x) => x.id === id ? { ...x, read: true } : x)); // optimistic
+    try {
+      await apiRequest(`/notifications/${id}/read`, { method: "PATCH", token });
+    } catch {
+      // non-critical — the notification stays marked read locally even if this call fails
+    }
+  };
+
+  const handleNewShift = async (data) => {
+    try {
+      await apiRequest("/shifts", {
+        method: "POST",
+        token,
+        body: {
+          date: data.date,
+          start_time: data.start,
+          end_time: data.end,
+          location_name: data.location,
+          service_type: data.serviceType,
+          pay_rate: data.payRate,
+          required_skills: data.requiredSkills,
+          notes: data.notes || undefined,
+          mileage_note: data.mileage || undefined,
+          approval_required: data.approvalRequired,
+        },
+      });
+      await refreshShifts();
+      logActivity(`You published a new shift at ${data.location}, ${formatDate(data.date)}.`);
+      flash("Shift published");
+    } catch (err) {
+      flash(err.message || "Couldn't publish this shift.");
+    }
+  };
+
+  const handleCancelShift = async (shift) => {
+    try {
+      await apiRequest(`/shifts/${shift.id}/cancel`, { method: "POST", token });
+      await refreshShifts();
+      logActivity(`You cancelled the shift at ${shift.location}, ${formatDate(shift.date)}.`);
+      flash("Shift cancelled");
+    } catch (err) {
+      flash(err.message || "Couldn't cancel this shift.");
+    }
+  };
+
+  const handleDecide = async (shift, decision) => {
+    try {
+      await apiRequest(`/shifts/${shift.id}/decide`, { method: "POST", token, body: { decision } });
+      await refreshShifts();
+      logActivity(`You ${decision} the request for ${shift.location}, ${formatDate(shift.date)}.`);
+      flash(decision === "approved" ? "Request approved" : "Request declined");
+    } catch (err) {
+      flash(err.message || "Couldn't record this decision.");
+    }
+  };
+
+  const handleToggleApproval = async (id) => {
+    const target = staff.find((s) => s.id === id);
+    if (!target) return;
+    try {
+      await apiRequest(`/staff/${id}/approval`, { method: "PATCH", token, body: { bankApproved: !target.bankApproved } });
+      await refreshStaffDirectory();
+      flash(target.bankApproved ? "Bank approval suspended" : "Approved for bank shifts");
+    } catch (err) {
+      flash(err.message || "Couldn't update approval status.");
+    }
+  };
+
+  if (API_NOT_CONFIGURED) {
+    return (
+      <div className="w-full h-screen flex items-center justify-center px-6" style={{ backgroundColor: C.pine }}>
+        {FONTS}
+        <div className="max-w-sm bg-white rounded-2xl p-6 text-center space-y-2">
+          <AlertTriangle size={28} color={C.clay} className="mx-auto" />
+          <h2 className="f-display text-lg font-semibold" style={{ color: C.ink }}>Backend not configured</h2>
+          <p className="text-sm" style={{ color: C.slate }}>
+            Set <code className="f-mono">API_BASE_URL</code> near the top of this file to your deployed backend URL, then reload.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return <LoginPage onLogin={handleLogin} onForgotPassword={handleForgotPassword} onResetPassword={handleResetPassword} />;
+  }
+
+  const myNotifs = currentUser.role === "staff" ? notifs : [];
+  const displayName = currentUser.role === "staff"
+    ? (me?.name || `${currentUser.firstName} ${currentUser.lastName}`)
+    : `${currentUser.firstName} ${currentUser.lastName}`;
+
+  return (
+    <div className="w-full h-screen flex flex-col" style={{ backgroundColor: C.mist }}>
+      {FONTS}
+      <Toast message={toast} />
+
+      <div className="flex items-center justify-between px-4 py-3 shrink-0" style={{ backgroundColor: C.pine }}>
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: C.pineDeep }}>
+            <Logo size={18} />
+          </div>
+          <span className="f-display font-semibold text-white text-lg">Bank my shift</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-white/80 hidden sm:inline">{displayName}</span>
+          <button onClick={handleLogout} className="flex items-center gap-1.5 text-xs font-medium text-white/80 hover:text-white bg-white/10 px-3 py-1.5 rounded-full">
+            <LogOut size={13} /> Sign out
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 relative overflow-hidden max-w-md mx-auto w-full sm:border-x" style={{ borderColor: C.border }}>
+        {loadingData && (
+          <div className="p-4 text-sm" style={{ color: C.slate }}>Loading…</div>
+        )}
+        {loadError && (
+          <div className="m-4 p-3 rounded-lg text-sm" style={{ backgroundColor: C.clayTint, color: C.clay }}>{loadError}</div>
+        )}
+        {!loadingData && currentUser.role === "staff" && me && (
+          <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onRead={handleRead} />
+        )}
+        {!loadingData && (currentUser.role === "manager" || currentUser.role === "admin") && (
+          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} />
+        )}
+      </div>
+    </div>
+  );
+}
