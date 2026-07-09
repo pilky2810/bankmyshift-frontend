@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   Calendar, Clock, MapPin, Filter, Bell, User, CheckCircle2, XCircle,
   PlusCircle, AlertTriangle, ChevronRight, Search, ShieldCheck, ShieldAlert,
@@ -44,6 +44,13 @@ const FONTS = (
 const API_BASE_URL = "https://bankmyshift-api.onrender.com";
 
 const API_NOT_CONFIGURED = API_BASE_URL.includes("REPLACE-WITH");
+
+// Session survives a page refresh via sessionStorage (cleared when the browser tab
+// closes), rather than the JWT living only in React state. sessionStorage is a
+// reasonable tradeoff for a real deployed app — not persistent indefinitely like
+// localStorage, but not lost on every refresh either.
+const SESSION_TOKEN_KEY = "bms_token";
+const SESSION_USER_KEY = "bms_user";
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -1354,8 +1361,15 @@ function ChangePasswordModal({ onClose, onSubmit }) {
 export default function App() {
   // JWT lives only in React state — never written to localStorage/sessionStorage,
   // so it disappears on refresh (matches the backend README's storage guidance).
-  const [token, setToken] = useState(null);
-  const [currentUser, setCurrentUser] = useState(null); // { id, role, firstName, lastName, email, bankApproved }
+  const [token, setToken] = useState(() => sessionStorage.getItem(SESSION_TOKEN_KEY) || null);
+  const [currentUser, setCurrentUser] = useState(() => { // { id, role, firstName, lastName, email, bankApproved }
+    try {
+      const raw = sessionStorage.getItem(SESSION_USER_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
   const [me, setMe] = useState(null); // normalized /staff/me profile (staff role only)
   const [shifts, setShifts] = useState([]);
   const [staff, setStaff] = useState([]);
@@ -1398,16 +1412,33 @@ export default function App() {
         await refreshMe(tok);
       }
     } catch (err) {
-      setLoadError(err.message || "Couldn't load your data.");
+      if (err instanceof ApiError && err.status === 401) {
+        // Restored/stale session is no longer valid — drop back to the login screen
+        // rather than leaving the app shell stuck with a permanent error banner.
+        handleLogout();
+      } else {
+        setLoadError(err.message || "Couldn't load your data.");
+      }
     } finally {
       setLoadingData(false);
     }
   };
 
+  // On first load, restore a session that survived a page refresh (see
+  // SESSION_TOKEN_KEY/SESSION_USER_KEY above) and re-fetch its data.
+  useEffect(() => {
+    if (token && currentUser) {
+      loadForRole(currentUser.role, token);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleLogin = async (email, password) => {
     const data = await apiRequest("/auth/login", { method: "POST", body: { email, password } });
     setToken(data.token);
     setCurrentUser(data.user);
+    sessionStorage.setItem(SESSION_TOKEN_KEY, data.token);
+    sessionStorage.setItem(SESSION_USER_KEY, JSON.stringify(data.user));
     flash(`Welcome back, ${data.user.firstName}`);
     await loadForRole(data.user.role, data.token);
   };
@@ -1425,6 +1456,8 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    sessionStorage.removeItem(SESSION_USER_KEY);
     setToken(null);
     setCurrentUser(null);
     setMe(null);
