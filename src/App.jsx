@@ -2022,7 +2022,7 @@ export default function App() {
           <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onHandback={handleHandback} onRead={handleRead} />
         )}
         {!loadingData && (currentUser.role === "manager" || currentUser.role === "admin") && (
-          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} />
+          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onReinstateShift={handleReinstateShift} onDecide={handleDecide} onDecideHandback={handleDecideHandback} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} />
         )}
       </div>
 
