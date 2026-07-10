@@ -4,7 +4,7 @@ import {
   PlusCircle, AlertTriangle, ChevronRight, Search, ShieldCheck, ShieldAlert,
   LogIn, LogOut, X, Users, LayoutDashboard, ClipboardList, CalendarClock,
   BadgeCheck, Ban, ChevronDown, Activity, MapPinned, Lock, Mail, Eye, EyeOff,
-  AlertCircle
+  AlertCircle, Building2
 } from "lucide-react";
 
 /* ---------------------------------- THEME ---------------------------------- */
@@ -222,6 +222,13 @@ const normalizeStaffListItem = (u) => {
   };
 };
 
+const normalizeCompany = (c) => ({
+  id: c.id,
+  name: c.name,
+  code: c.code,
+  staffCount: c.staff_count,
+});
+
 const normalizeNotification = (n) => ({
   id: n.id,
   staffId: n.user_id,
@@ -354,6 +361,7 @@ function Logo({ size = 22 }) {
 
 function LoginPage({ onLogin, onForgotPassword, onResetPassword }) {
   const [step, setStep] = useState("login"); // login | forgot-email | forgot-reset | reset-success
+  const [companyCode, setCompanyCode] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
@@ -368,7 +376,7 @@ function LoginPage({ onLogin, onForgotPassword, onResetPassword }) {
     e.preventDefault();
     setError(""); setBusy(true);
     try {
-      await onLogin(email, password);
+      await onLogin(companyCode.trim(), email, password);
     } catch (err) {
       setError(err.message || "Sign in failed.");
     } finally {
@@ -427,6 +435,14 @@ function LoginPage({ onLogin, onForgotPassword, onResetPassword }) {
 
         {step === "login" && (
           <form onSubmit={handleSubmit} className="bg-white rounded-2xl p-5 space-y-3.5">
+            <div>
+              <label className="text-xs font-medium" style={{ color: C.slate }}>Company code</label>
+              <div className="flex items-center gap-2 border rounded-lg px-3 py-2.5 mt-1" style={{ borderColor: C.border }}>
+                <Building2 size={15} color={C.slate} />
+                <input value={companyCode} onChange={(e) => setCompanyCode(e.target.value)} placeholder="e.g. fhcs" className="flex-1 text-sm outline-none" autoCapitalize="none" autoComplete="organization" />
+              </div>
+            </div>
+
             <div>
               <label className="text-xs font-medium" style={{ color: C.slate }}>Email address</label>
               <div className="flex items-center gap-2 border rounded-lg px-3 py-2.5 mt-1" style={{ borderColor: C.border }}>
@@ -1648,9 +1664,142 @@ function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTrainin
   );
 }
 
+/* ---------------------------------- COMPANIES (super admin only) ---------------------------------- */
+
+function NewCompanyModal({ onClose, onCreate }) {
+  const [form, setForm] = useState({
+    name: "", code: "", adminFirstName: "", adminLastName: "", adminEmail: "", adminTemporaryPassword: "",
+  });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [created, setCreated] = useState(null); // { name, code }
+
+  const generatePassword = () => {
+    const words = ["Harbor", "Falcon", "Meadow", "Cobalt", "Ridge", "Amber", "Willow", "Granite", "Compass", "Marble", "Cedar", "Heron", "Otter", "Birch"];
+    let w1 = words[Math.floor(Math.random() * words.length)];
+    let w2 = words[Math.floor(Math.random() * words.length)];
+    while (w2 === w1) w2 = words[Math.floor(Math.random() * words.length)];
+    const n = Math.floor(1000 + Math.random() * 9000);
+    setForm((f) => ({ ...f, adminTemporaryPassword: `${w1}-${w2}-${n}!` }));
+  };
+
+  const handleSubmit = async () => {
+    setError("");
+    if (!form.name || !form.code || !form.adminFirstName || !form.adminLastName || !form.adminEmail) {
+      setError("All fields are required.");
+      return;
+    }
+    if (form.adminTemporaryPassword.length < 8) {
+      setError("Temporary password must be at least 8 characters — use Generate if unsure.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await onCreate(form);
+      setCreated({ name: form.name, code: form.code.toLowerCase() });
+    } catch (err) {
+      setError(err.message || "Couldn't create this company.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (created) {
+    return (
+      <Modal title="Company created" onClose={onClose}>
+        <div className="text-center space-y-3">
+          <div className="w-11 h-11 rounded-full flex items-center justify-center mx-auto" style={{ backgroundColor: C.sageTint }}>
+            <CheckCircle2 size={22} color={C.sage} />
+          </div>
+          <p className="text-sm" style={{ color: C.ink }}>
+            {created.name} is ready. Their company code is <span className="f-mono font-semibold">{created.code}</span> — everyone there will need it to sign in. Their first admin has been emailed their sign-in details.
+          </p>
+          <Button full onClick={onClose}>Done</Button>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Add a company" onClose={onClose} wide>
+      <div className="space-y-3">
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Company name</label>
+          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+        </div>
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Company code (short, no spaces — this is what everyone types at login)</label>
+          <input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="e.g. fhcs" className="w-full mt-1 text-sm border rounded-md px-2 py-1.5 f-mono" style={{ borderColor: C.border }} />
+        </div>
+
+        <div className="pt-1 text-xs font-semibold uppercase tracking-wide" style={{ color: C.slate }}>First admin account</div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>First name</label>
+            <input value={form.adminFirstName} onChange={(e) => setForm({ ...form, adminFirstName: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+          </div>
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Last name</label>
+            <input value={form.adminLastName} onChange={(e) => setForm({ ...form, adminLastName: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+          </div>
+        </div>
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Email address</label>
+          <input type="email" value={form.adminEmail} onChange={(e) => setForm({ ...form, adminEmail: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
+        </div>
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Temporary password</label>
+          <div className="flex gap-2 mt-1">
+            <input value={form.adminTemporaryPassword} onChange={(e) => setForm({ ...form, adminTemporaryPassword: e.target.value })} placeholder="At least 8 characters" className="flex-1 text-sm border rounded-md px-2 py-1.5 f-mono" style={{ borderColor: C.border }} />
+            <Button variant="secondary" size="sm" onClick={generatePassword}>Generate</Button>
+          </div>
+        </div>
+
+        {error && (
+          <div className="flex items-center gap-1.5 text-xs p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+            <AlertCircle size={13} /> {error}
+          </div>
+        )}
+
+        <Button full icon={PlusCircle} disabled={busy} onClick={handleSubmit}>{busy ? "Creating…" : "Create company"}</Button>
+      </div>
+    </Modal>
+  );
+}
+
+function ManagerCompaniesPage({ companies, onAddCompany }) {
+  const [showNew, setShowNew] = useState(false);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Companies</h1>
+        <Button icon={PlusCircle} onClick={() => setShowNew(true)} size="sm">Add company</Button>
+      </div>
+      <p className="text-sm" style={{ color: C.slate }}>
+        Everyone signs in with their company's code, so each organisation's staff and shifts stay completely separate.
+      </p>
+      <div className="space-y-3">
+        {companies.map((c) => (
+          <div key={c.id} className="bg-white rounded-xl border p-4 flex items-center justify-between" style={{ borderColor: C.border }}>
+            <div>
+              <div className="text-sm font-semibold" style={{ color: C.ink }}>{c.name}</div>
+              <div className="text-xs" style={{ color: C.slate }}>{c.staffCount} account{c.staffCount !== 1 ? "s" : ""}</div>
+            </div>
+            <Pill small color={C.pine} tint={C.pineTint}>{c.code}</Pill>
+          </div>
+        ))}
+        {companies.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No companies yet — add the first one above.</div>}
+      </div>
+
+      {showNew && <NewCompanyModal onClose={() => setShowNew(false)} onCreate={onAddCompany} />}
+    </div>
+  );
+}
+
 /* ---------------------------------- MANAGER APP SHELL ---------------------------------- */
 
-function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onReinstateShift, onDecide, onDecideHandback, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails, onRemoveStaff, onRestoreStaff }) {
+function ManagerApp({ shifts, staff, activity, managerName, isSuperAdmin, companies, onNewShift, onCancelShift, onReinstateShift, onDecide, onDecideHandback, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails, onRemoveStaff, onRestoreStaff, onAddCompany }) {
   const [tab, setTab] = useState("dashboard");
   const [showNew, setShowNew] = useState(false);
   const pendingCount = shifts.filter((s) => s.status === "pending" || s.status === "handback_requested").length;
@@ -1660,6 +1809,7 @@ function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancel
     { id: "shifts", label: "Shifts", icon: CalendarClock },
     { id: "approvals", label: "Approvals", icon: BadgeCheck, badge: pendingCount },
     { id: "staff", label: "Staff", icon: Users },
+    ...(isSuperAdmin ? [{ id: "companies", label: "Companies", icon: Building2 }] : []),
   ];
 
   return (
@@ -1678,6 +1828,7 @@ function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancel
         {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} onReinstate={onReinstateShift} />}
         {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} onDecideHandback={onDecideHandback} />}
         {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} onToggleTraining={onToggleTraining} onEditDetails={onEditDetails} onRemoveStaff={onRemoveStaff} onRestoreStaff={onRestoreStaff} />}
+        {tab === "companies" && isSuperAdmin && <ManagerCompaniesPage companies={companies} onAddCompany={onAddCompany} />}
       </div>
 
       {showNew && <NewShiftModal onClose={() => setShowNew(false)} onCreate={(data) => { onNewShift(data); setShowNew(false); }} />}
@@ -1765,6 +1916,7 @@ export default function App() {
   const [me, setMe] = useState(null); // normalized /staff/me profile (staff role only)
   const [shifts, setShifts] = useState([]);
   const [staff, setStaff] = useState([]);
+  const [companies, setCompanies] = useState([]); // super admins only
   const [notifs, setNotifs] = useState([]);
   const [activity, setActivity] = useState([]);
   const [toast, setToast] = useState("");
@@ -1787,12 +1939,16 @@ export default function App() {
     const data = await apiRequest("/staff", { token: tok });
     setStaff(data.map(normalizeStaffListItem));
   };
+  const refreshCompanies = async (tok = token) => {
+    const data = await apiRequest("/companies", { token: tok });
+    setCompanies(data.map(normalizeCompany));
+  };
   const refreshMe = async (tok = token) => {
     const data = await apiRequest("/staff/me", { token: tok });
     setMe(normalizeMe(data));
   };
 
-  const loadForRole = async (role, tok) => {
+  const loadForRole = async (role, tok, isSuperAdmin) => {
     setLoadingData(true);
     setLoadError("");
     try {
@@ -1800,6 +1956,7 @@ export default function App() {
       await refreshNotifications(tok);
       if (role === "manager" || role === "admin") {
         await refreshStaffDirectory(tok);
+        if (isSuperAdmin) await refreshCompanies(tok);
       } else {
         await refreshMe(tok);
       }
@@ -1820,19 +1977,19 @@ export default function App() {
   // SESSION_TOKEN_KEY/SESSION_USER_KEY above) and re-fetch its data.
   useEffect(() => {
     if (token && currentUser) {
-      loadForRole(currentUser.role, token);
+      loadForRole(currentUser.role, token, currentUser.isSuperAdmin);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleLogin = async (email, password) => {
-    const data = await apiRequest("/auth/login", { method: "POST", body: { email, password } });
+  const handleLogin = async (companyCode, email, password) => {
+    const data = await apiRequest("/auth/login", { method: "POST", body: { companyCode, email, password } });
     setToken(data.token);
     setCurrentUser(data.user);
     sessionStorage.setItem(SESSION_TOKEN_KEY, data.token);
     sessionStorage.setItem(SESSION_USER_KEY, JSON.stringify(data.user));
     flash(`Welcome back, ${data.user.firstName}`);
-    await loadForRole(data.user.role, data.token);
+    await loadForRole(data.user.role, data.token, data.user.isSuperAdmin);
   };
 
   const handleForgotPassword = async (email) => {
@@ -2064,6 +2221,24 @@ export default function App() {
     }
   };
 
+  // Super admin only — errors left to propagate so NewCompanyModal can show them inline.
+  const handleCreateCompany = async (form) => {
+    await apiRequest("/companies", {
+      method: "POST",
+      token,
+      body: {
+        name: form.name,
+        code: form.code,
+        adminFirstName: form.adminFirstName,
+        adminLastName: form.adminLastName,
+        adminEmail: form.adminEmail,
+        adminTemporaryPassword: form.adminTemporaryPassword,
+      },
+    });
+    await refreshCompanies();
+    logActivity(`You added a new company: ${form.name}.`);
+  };
+
   if (API_NOT_CONFIGURED) {
     return (
       <div className="w-full h-screen flex items-center justify-center px-6" style={{ backgroundColor: C.pine }}>
@@ -2122,7 +2297,7 @@ export default function App() {
           <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onHandback={handleHandback} onRead={handleRead} />
         )}
         {!loadingData && (currentUser.role === "manager" || currentUser.role === "admin") && (
-          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onReinstateShift={handleReinstateShift} onDecide={handleDecide} onDecideHandback={handleDecideHandback} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} onRemoveStaff={handleRemoveStaff} onRestoreStaff={handleRestoreStaff} />
+          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} isSuperAdmin={!!currentUser.isSuperAdmin} companies={companies} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onReinstateShift={handleReinstateShift} onDecide={handleDecide} onDecideHandback={handleDecideHandback} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} onRemoveStaff={handleRemoveStaff} onRestoreStaff={handleRestoreStaff} onAddCompany={handleCreateCompany} />
         )}
       </div>
 
