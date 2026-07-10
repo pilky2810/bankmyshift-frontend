@@ -142,6 +142,7 @@ const STATUS_META = {
   confirmed: { label: "Confirmed", color: C.sage, tint: C.sageTint },
   completed: { label: "Completed", color: C.slate, tint: C.pineTint },
   cancelled: { label: "Cancelled", color: C.clay, tint: C.clayTint },
+  handback_requested: { label: "Hand-back requested", color: C.amber, tint: C.amberTint },
 };
 
 /* ----- API <-> UI shape adapters -----
@@ -287,6 +288,36 @@ function Toast({ message, tone = "success" }) {
     <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium text-white animate-pulse-once" style={{ backgroundColor: bg }}>
       {message}
     </div>
+  );
+}
+
+// Generic "are you sure" step for anything destructive or hard to undo — used
+// by shift cancellation, hand-back requests, and cancelling a pending claim.
+// onConfirm is expected to handle its own errors (flash a toast) rather than
+// throw, since that's the pattern the rest of the app already uses — this just
+// waits for it to finish before closing.
+function ConfirmModal({ title, message, confirmLabel = "Confirm", danger = true, onConfirm, onClose }) {
+  const [busy, setBusy] = useState(false);
+
+  const handleConfirm = async () => {
+    setBusy(true);
+    await onConfirm();
+    setBusy(false);
+    onClose();
+  };
+
+  return (
+    <Modal title={title} onClose={onClose}>
+      <div className="space-y-4">
+        <p className="text-sm" style={{ color: C.ink }}>{message}</p>
+        <div className="flex gap-2">
+          <Button variant="secondary" full onClick={onClose} disabled={busy}>Go back</Button>
+          <Button variant={danger ? "danger" : "primary"} full disabled={busy} onClick={handleConfirm}>
+            {busy ? "Working…" : confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -536,7 +567,8 @@ function ShiftCard({ shift, me, onOpen, compact }) {
 
 /* ---------------------------------- STAFF: SHIFT DETAIL ---------------------------------- */
 
-function ShiftDetailModal({ shift, me, allShifts, onClose, onClaim, onCancelClaim }) {
+function ShiftDetailModal({ shift, me, allShifts, onClose, onClaim, onCancelClaim, onHandback }) {
+  const [confirmAction, setConfirmAction] = useState(null); // null | 'cancel-claim' | 'handback'
   const meta = STATUS_META[shift.status];
   const missing = missingSkills(me, shift);
   const myUpcoming = allShifts.filter((s) => s.claimedBy === me.id && (s.status === "confirmed" || s.status === "pending") && s.id !== shift.id);
@@ -638,10 +670,20 @@ function ShiftDetailModal({ shift, me, allShifts, onClose, onClaim, onCancelClai
         )}
 
         <div className="pt-2">
-          {isMine && (shift.status === "confirmed" || shift.status === "pending") && (
-            <Button variant="danger" full icon={Ban} onClick={() => onCancelClaim(shift)}>
+          {isMine && shift.status === "pending" && (
+            <Button variant="danger" full icon={Ban} onClick={() => setConfirmAction("cancel-claim")}>
               Cancel my claim
             </Button>
+          )}
+          {isMine && shift.status === "confirmed" && (
+            <Button variant="danger" full icon={Ban} onClick={() => setConfirmAction("handback")}>
+              Hand back shift
+            </Button>
+          )}
+          {isMine && shift.status === "handback_requested" && (
+            <div className="text-sm text-center py-2" style={{ color: C.slate }}>
+              Hand-back requested — waiting for your manager to review it.
+            </div>
           )}
           {!isMine && shift.status === "open" && (
             <Button variant="primary" full disabled={!canClaim} icon={CheckCircle2} onClick={() => onClaim(shift)}>
@@ -653,6 +695,25 @@ function ShiftDetailModal({ shift, me, allShifts, onClose, onClaim, onCancelClai
           )}
         </div>
       </div>
+
+      {confirmAction === "cancel-claim" && (
+        <ConfirmModal
+          title="Cancel your claim?"
+          message={`This will release the ${formatDate(shift.date)} shift at ${shift.location} back to the available list right away.`}
+          confirmLabel="Cancel my claim"
+          onConfirm={() => onCancelClaim(shift)}
+          onClose={() => setConfirmAction(null)}
+        />
+      )}
+      {confirmAction === "handback" && (
+        <ConfirmModal
+          title="Request a hand-back?"
+          message={`This sends a request to your manager to release you from the ${formatDate(shift.date)} shift at ${shift.location}. You're still confirmed for it unless they approve the request.`}
+          confirmLabel="Send request"
+          onConfirm={() => onHandback(shift)}
+          onClose={() => setConfirmAction(null)}
+        />
+      )}
     </Modal>
   );
 }
@@ -829,7 +890,7 @@ function StaffProfilePage({ me }) {
 
 /* ---------------------------------- STAFF APP SHELL ---------------------------------- */
 
-function StaffApp({ shifts, me, notifs, onClaim, onCancelClaim, onRead }) {
+function StaffApp({ shifts, me, notifs, onClaim, onCancelClaim, onHandback, onRead }) {
   const [tab, setTab] = useState("shifts");
   const [openShift, setOpenShift] = useState(null);
   const unread = notifs.filter((n) => !n.read).length;
@@ -868,6 +929,7 @@ function StaffApp({ shifts, me, notifs, onClaim, onCancelClaim, onRead }) {
           onClose={() => setOpenShift(null)}
           onClaim={(s) => { onClaim(s); setOpenShift(null); }}
           onCancelClaim={(s) => { onCancelClaim(s); setOpenShift(null); }}
+          onHandback={(s) => { onHandback(s); setOpenShift(null); }}
         />
       )}
     </div>
@@ -1012,6 +1074,8 @@ function ManagerDashboard({ shifts, staff, activity, managerName, goShifts, goAp
   const open = shifts.filter((s) => s.status === "open");
   const confirmed = shifts.filter((s) => s.status === "confirmed");
   const pending = shifts.filter((s) => s.status === "pending");
+  const handbacks = shifts.filter((s) => s.status === "handback_requested");
+  const awaitingApproval = pending.length + handbacks.length;
   const now = new Date();
   const urgent = open.filter((s) => new Date(s.date) - now < 1000 * 60 * 60 * 24 * 3);
 
@@ -1025,7 +1089,7 @@ function ManagerDashboard({ shifts, staff, activity, managerName, goShifts, goAp
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <StatCard label="Open shifts" value={open.length} color={C.clay} />
         <StatCard label="Confirmed" value={confirmed.length} color={C.sage} />
-        <StatCard label="Pending approvals" value={pending.length} color={C.amber} />
+        <StatCard label="Awaiting approval" value={awaitingApproval} color={C.amber} />
         <StatCard label="Staff on file" value={staff.length} />
       </div>
 
@@ -1034,10 +1098,10 @@ function ManagerDashboard({ shifts, staff, activity, managerName, goShifts, goAp
         <CoverageMeter shifts={shifts} />
       </div>
 
-      {pending.length > 0 && (
+      {awaitingApproval > 0 && (
         <button onClick={goApprovals} className="w-full flex items-center justify-between bg-white rounded-xl border p-4 hover:shadow-md" style={{ borderColor: C.border }}>
           <div className="flex items-center gap-2 text-sm font-medium" style={{ color: C.ink }}>
-            <AlertTriangle size={16} color={C.amber} /> {pending.length} shift request{pending.length !== 1 ? "s" : ""} waiting for your approval
+            <AlertTriangle size={16} color={C.amber} /> {awaitingApproval} item{awaitingApproval !== 1 ? "s" : ""} waiting for your approval
           </div>
           <ChevronRight size={16} color={C.slate} />
         </button>
@@ -1074,8 +1138,9 @@ function ManagerDashboard({ shifts, staff, activity, managerName, goShifts, goAp
   );
 }
 
-function ManagerShiftsPage({ shifts, staff, onNew, onCancel }) {
+function ManagerShiftsPage({ shifts, staff, onNew, onCancel, onReinstate }) {
   const [filter, setFilter] = useState("all");
+  const [confirmCancel, setConfirmCancel] = useState(null); // shift pending a cancel confirmation
   const filtered = filter === "all" ? shifts : shifts.filter((s) => s.status === filter);
   const staffName = (id) => staff.find((s) => s.id === id)?.name || "—";
 
@@ -1105,51 +1170,93 @@ function ManagerShiftsPage({ shifts, staff, onNew, onCancel }) {
             <div className="flex flex-col items-end gap-2 shrink-0">
               <Pill small color={STATUS_META[s.status].color} tint={STATUS_META[s.status].tint}>{STATUS_META[s.status].label}</Pill>
               {(s.status === "open" || s.status === "confirmed" || s.status === "pending") && (
-                <button onClick={() => onCancel(s)} className="text-xs font-medium" style={{ color: C.clay }}>Cancel</button>
+                <button onClick={() => setConfirmCancel(s)} className="text-xs font-medium" style={{ color: C.clay }}>Cancel</button>
+              )}
+              {s.status === "cancelled" && (
+                <button onClick={() => onReinstate(s)} className="text-xs font-medium" style={{ color: C.pine }}>Reinstate</button>
               )}
             </div>
           </div>
         ))}
         {filtered.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No shifts in this view.</div>}
       </div>
+
+      {confirmCancel && (
+        <ConfirmModal
+          title="Cancel this shift?"
+          message={`This will cancel the ${formatDate(confirmCancel.date)} shift at ${confirmCancel.location}${confirmCancel.claimedBy ? ` — ${staffName(confirmCancel.claimedBy)} will be notified.` : "."} You can reinstate it afterwards if this was a mistake.`}
+          confirmLabel="Cancel shift"
+          onConfirm={() => onCancel(confirmCancel)}
+          onClose={() => setConfirmCancel(null)}
+        />
+      )}
     </div>
   );
 }
 
-function ManagerApprovalsPage({ shifts, staff, onDecide }) {
+function ManagerApprovalsPage({ shifts, staff, onDecide, onDecideHandback }) {
   const pending = shifts.filter((s) => s.status === "pending");
+  const handbacks = shifts.filter((s) => s.status === "handback_requested");
   const staffOf = (id) => staff.find((s) => s.id === id);
 
   return (
-    <div className="space-y-4">
-      <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Approvals</h1>
-      <div className="space-y-3">
-        {pending.map((s) => {
-          const st = staffOf(s.claimedBy);
-          const missing = st ? missingSkills(st, s) : [];
-          return (
-            <div key={s.id} className="bg-white rounded-xl border p-4" style={{ borderColor: C.border }}>
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="f-mono text-sm font-semibold" style={{ color: C.ink }}>{formatDate(s.date)} · {s.start}–{s.end}</div>
-                  <div className="text-sm mt-0.5" style={{ color: C.slate }}>{s.location} · {s.serviceType}</div>
-                  <div className="text-sm mt-1.5 font-medium" style={{ color: C.pine }}>Requested by {st?.name || "a staff member"}</div>
+    <div className="space-y-6">
+      <div>
+        <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Approvals</h1>
+        <div className="space-y-3 mt-3">
+          {pending.map((s) => {
+            const st = staffOf(s.claimedBy);
+            const missing = st ? missingSkills(st, s) : [];
+            return (
+              <div key={s.id} className="bg-white rounded-xl border p-4" style={{ borderColor: C.border }}>
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="f-mono text-sm font-semibold" style={{ color: C.ink }}>{formatDate(s.date)} · {s.start}–{s.end}</div>
+                    <div className="text-sm mt-0.5" style={{ color: C.slate }}>{s.location} · {s.serviceType}</div>
+                    <div className="text-sm mt-1.5 font-medium" style={{ color: C.pine }}>Requested by {st?.name || "a staff member"}</div>
+                  </div>
+                  <div className="f-mono text-sm font-semibold" style={{ color: C.pine }}>£{s.payRate.toFixed(2)}/hr</div>
                 </div>
-                <div className="f-mono text-sm font-semibold" style={{ color: C.pine }}>£{s.payRate.toFixed(2)}/hr</div>
-              </div>
-              {missing.length > 0 && (
-                <div className="flex items-center gap-1.5 text-xs mt-2 p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
-                  <ShieldAlert size={13} /> Missing: {missing.map((m) => SKILL_LABEL[m] || m).join(", ")}
+                {missing.length > 0 && (
+                  <div className="flex items-center gap-1.5 text-xs mt-2 p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+                    <ShieldAlert size={13} /> Missing: {missing.map((m) => SKILL_LABEL[m] || m).join(", ")}
+                  </div>
+                )}
+                <div className="flex gap-2 mt-3">
+                  <Button size="sm" variant="secondary" icon={XCircle} onClick={() => onDecide(s, "rejected")}>Decline</Button>
+                  <Button size="sm" icon={CheckCircle2} onClick={() => onDecide(s, "approved")}>Approve</Button>
                 </div>
-              )}
-              <div className="flex gap-2 mt-3">
-                <Button size="sm" variant="secondary" icon={XCircle} onClick={() => onDecide(s, "rejected")}>Decline</Button>
-                <Button size="sm" icon={CheckCircle2} onClick={() => onDecide(s, "approved")}>Approve</Button>
               </div>
-            </div>
-          );
-        })}
-        {pending.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No pending requests.</div>}
+            );
+          })}
+          {pending.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No pending requests.</div>}
+        </div>
+      </div>
+
+      <div>
+        <h2 className="text-sm font-semibold mb-2" style={{ color: C.ink }}>Hand-back requests</h2>
+        <div className="space-y-3">
+          {handbacks.map((s) => {
+            const st = staffOf(s.claimedBy);
+            return (
+              <div key={s.id} className="bg-white rounded-xl border p-4" style={{ borderColor: C.border }}>
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="f-mono text-sm font-semibold" style={{ color: C.ink }}>{formatDate(s.date)} · {s.start}–{s.end}</div>
+                    <div className="text-sm mt-0.5" style={{ color: C.slate }}>{s.location} · {s.serviceType}</div>
+                    <div className="text-sm mt-1.5 font-medium" style={{ color: C.amber }}>{st?.name || "A staff member"} wants to hand this back</div>
+                  </div>
+                  <div className="f-mono text-sm font-semibold" style={{ color: C.pine }}>£{s.payRate.toFixed(2)}/hr</div>
+                </div>
+                <div className="flex gap-2 mt-3">
+                  <Button size="sm" variant="secondary" icon={XCircle} onClick={() => onDecideHandback(s, "rejected")}>Keep them on it</Button>
+                  <Button size="sm" icon={CheckCircle2} onClick={() => onDecideHandback(s, "approved")}>Accept hand-back</Button>
+                </div>
+              </div>
+            );
+          })}
+          {handbacks.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No hand-back requests.</div>}
+        </div>
       </div>
     </div>
   );
@@ -1468,10 +1575,10 @@ function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTrainin
 
 /* ---------------------------------- MANAGER APP SHELL ---------------------------------- */
 
-function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onDecide, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails }) {
+function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onReinstateShift, onDecide, onDecideHandback, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails }) {
   const [tab, setTab] = useState("dashboard");
   const [showNew, setShowNew] = useState(false);
-  const pendingCount = shifts.filter((s) => s.status === "pending").length;
+  const pendingCount = shifts.filter((s) => s.status === "pending" || s.status === "handback_requested").length;
 
   const TABS = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -1493,8 +1600,8 @@ function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancel
 
       <div className="flex-1 overflow-y-auto scrollbar-none px-4 pt-4 pb-8">
         {tab === "dashboard" && <ManagerDashboard shifts={shifts} staff={staff} activity={activity} managerName={managerName} goShifts={() => setTab("shifts")} goApprovals={() => setTab("approvals")} />}
-        {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} />}
-        {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} />}
+        {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} onReinstate={onReinstateShift} />}
+        {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} onDecideHandback={onDecideHandback} />}
         {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} onToggleTraining={onToggleTraining} onEditDetails={onEditDetails} />}
       </div>
 
@@ -1700,6 +1807,17 @@ export default function App() {
     }
   };
 
+  const handleHandback = async (shift) => {
+    try {
+      await apiRequest(`/shifts/${shift.id}/handback`, { method: "POST", token });
+      await refreshShifts();
+      logActivity(`You requested to hand back ${shift.location}, ${formatDate(shift.date)}.`);
+      flash("Hand-back request sent — waiting for your manager");
+    } catch (err) {
+      flash(err.message || "Couldn't send this hand-back request.");
+    }
+  };
+
   const handleRead = async (id) => {
     setNotifs((n) => n.map((x) => x.id === id ? { ...x, read: true } : x)); // optimistic
     try {
@@ -1745,6 +1863,28 @@ export default function App() {
       flash("Shift cancelled");
     } catch (err) {
       flash(err.message || "Couldn't cancel this shift.");
+    }
+  };
+
+  const handleReinstateShift = async (shift) => {
+    try {
+      await apiRequest(`/shifts/${shift.id}/reinstate`, { method: "POST", token });
+      await refreshShifts();
+      logActivity(`You reinstated the shift at ${shift.location}, ${formatDate(shift.date)}.`);
+      flash("Shift reinstated");
+    } catch (err) {
+      flash(err.message || "Couldn't reinstate this shift.");
+    }
+  };
+
+  const handleDecideHandback = async (shift, decision) => {
+    try {
+      await apiRequest(`/shifts/${shift.id}/handback/decide`, { method: "POST", token, body: { decision } });
+      await refreshShifts();
+      logActivity(`You ${decision === "approved" ? "approved" : "declined"} the hand-back request for ${shift.location}, ${formatDate(shift.date)}.`);
+      flash(decision === "approved" ? "Hand-back approved — shift is open again" : "Hand-back declined — staff member stays confirmed");
+    } catch (err) {
+      flash(err.message || "Couldn't record this decision.");
     }
   };
 
@@ -1879,7 +2019,7 @@ export default function App() {
           <div className="m-4 p-3 rounded-lg text-sm" style={{ backgroundColor: C.clayTint, color: C.clay }}>{loadError}</div>
         )}
         {!loadingData && currentUser.role === "staff" && me && (
-          <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onRead={handleRead} />
+          <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onHandback={handleHandback} onRead={handleRead} />
         )}
         {!loadingData && (currentUser.role === "manager" || currentUser.role === "admin") && (
           <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} />
