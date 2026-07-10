@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from "react";
 import {
   Calendar, Clock, MapPin, Filter, Bell, User, CheckCircle2, XCircle,
-  PlusCircle, AlertTriangle, ChevronRight, Search, ShieldCheck, ShieldAlert,
+  PlusCircle, AlertTriangle, ChevronRight, ChevronLeft, Search, ShieldCheck, ShieldAlert,
   LogIn, LogOut, X, Users, LayoutDashboard, ClipboardList, CalendarClock,
   BadgeCheck, Ban, ChevronDown, Activity, MapPinned, Lock, Mail, Eye, EyeOff,
   AlertCircle, Building2
@@ -135,6 +135,68 @@ const formatRelativeTime = (iso) => {
 };
 
 const missingSkills = (staff, shift) => shift.requiredSkills.filter((s) => !staff.skills.includes(s));
+
+/* ----- Hours & pay summary helpers -----
+   All computed client-side from shifts already loaded — no extra API calls. */
+
+// Duration in hours between a shift's start/end time strings, handling the rare
+// overnight shift (end time earlier than start time) by assuming it crosses midnight.
+const shiftDurationHours = (shift) => {
+  let mins = toMinutes(shift.end) - toMinutes(shift.start);
+  if (mins <= 0) mins += 24 * 60;
+  return mins / 60;
+};
+
+const shiftStartDateTime = (shift) => new Date(`${shift.date}T${shift.start}:00`);
+
+// Monday 00:00 of the week containing `date`.
+const mondayOf = (date) => {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  const day = (d.getDay() + 6) % 7; // 0=Mon .. 6=Sun
+  d.setDate(d.getDate() - day);
+  return d;
+};
+
+// A fixed Monday used only to keep 4-week blocks stable and non-overlapping as
+// you page back and forth — 1 Jan 2024 was a Monday.
+const FOUR_WEEK_ANCHOR = mondayOf(new Date("2024-01-01T00:00:00"));
+
+// Returns the { start, end } (end exclusive) Date range for the week or 4-week
+// block containing `anchorDate`.
+const getPeriodRange = (anchorDate, mode) => {
+  const weekStart = mondayOf(anchorDate);
+  if (mode === "week") {
+    const end = new Date(weekStart);
+    end.setDate(end.getDate() + 7);
+    return { start: weekStart, end };
+  }
+  const diffWeeks = Math.round((weekStart - FOUR_WEEK_ANCHOR) / (7 * 24 * 60 * 60 * 1000));
+  const blockIndex = Math.floor(diffWeeks / 4);
+  const start = new Date(FOUR_WEEK_ANCHOR);
+  start.setDate(start.getDate() + blockIndex * 28);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 28);
+  return { start, end };
+};
+
+// Sums hours + pay for confirmed shifts that have already happened, within
+// [start, end). Pass staffId to scope to one person, or omit for a company-wide
+// total across everyone who's actually claimed a shift.
+const summarizeHoursAndPay = (shifts, { start, end, staffId }) => {
+  const now = new Date();
+  let hours = 0, pay = 0;
+  for (const s of shifts) {
+    if (s.status !== "confirmed" || !s.claimedBy) continue;
+    if (staffId && s.claimedBy !== staffId) continue;
+    const dt = shiftStartDateTime(s);
+    if (dt < start || dt >= end || dt > now) continue;
+    const h = shiftDurationHours(s);
+    hours += h;
+    pay += h * s.payRate;
+  }
+  return { hours, pay };
+};
 
 const STATUS_META = {
   open: { label: "Open", color: C.amber, tint: C.amberTint },
@@ -825,6 +887,62 @@ function StaffShiftsPage({ shifts, me, onOpen }) {
   );
 }
 
+// Week/4-week toggle with prev/next navigation — shared by the staff and manager
+// hours & pay views so browsing periods behaves identically in both places.
+function PeriodPicker({ mode, setMode, anchor, setAnchor }) {
+  const { start, end } = getPeriodRange(anchor, mode);
+  const displayEnd = new Date(end);
+  displayEnd.setDate(displayEnd.getDate() - 1);
+  const label = `${start.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} – ${displayEnd.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}`;
+  const step = mode === "week" ? 7 : 28;
+  const shift = (delta) => setAnchor((a) => { const d = new Date(a); d.setDate(d.getDate() + delta); return d; });
+
+  return (
+    <div className="flex items-center justify-between gap-2 flex-wrap">
+      <div className="flex rounded-lg border overflow-hidden shrink-0" style={{ borderColor: C.border }}>
+        <button onClick={() => setMode("week")} className="text-xs font-medium px-2.5 py-1.5" style={{ backgroundColor: mode === "week" ? C.pine : "white", color: mode === "week" ? "white" : C.slate }}>Weekly</button>
+        <button onClick={() => setMode("4week")} className="text-xs font-medium px-2.5 py-1.5" style={{ backgroundColor: mode === "4week" ? C.pine : "white", color: mode === "4week" ? "white" : C.slate }}>4-weekly</button>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <button onClick={() => shift(-step)} className="p-1.5 rounded-md border" style={{ borderColor: C.border }}>
+          <ChevronLeft size={14} color={C.slate} />
+        </button>
+        <span className="text-xs font-medium f-mono whitespace-nowrap" style={{ color: C.ink }}>{label}</span>
+        <button onClick={() => shift(step)} className="p-1.5 rounded-md border" style={{ borderColor: C.border }}>
+          <ChevronRight size={14} color={C.slate} />
+        </button>
+        <button onClick={() => setAnchor(new Date())} className="text-xs font-medium ml-1" style={{ color: C.pine }}>Today</button>
+      </div>
+    </div>
+  );
+}
+
+// Staff self-service summary — hours worked and pay earned for a chosen period,
+// counting only confirmed shifts that have already happened.
+function HoursPaySummary({ shifts, me }) {
+  const [mode, setMode] = useState("week");
+  const [anchor, setAnchor] = useState(new Date());
+  const { start, end } = getPeriodRange(anchor, mode);
+  const { hours, pay } = summarizeHoursAndPay(shifts, { start, end, staffId: me.id });
+
+  return (
+    <div className="bg-white rounded-xl border p-4 space-y-3" style={{ borderColor: C.border }}>
+      <h2 className="text-sm font-semibold" style={{ color: C.ink }}>Hours & pay</h2>
+      <PeriodPicker mode={mode} setMode={setMode} anchor={anchor} setAnchor={setAnchor} />
+      <div className="grid grid-cols-2 gap-3 pt-1">
+        <div>
+          <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Hours worked</div>
+          <div className="f-mono text-xl font-semibold" style={{ color: C.ink }}>{hours.toFixed(1)}</div>
+        </div>
+        <div>
+          <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Total pay</div>
+          <div className="f-mono text-xl font-semibold" style={{ color: C.pine }}>£{pay.toFixed(2)}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StaffMyShiftsPage({ shifts, me, onOpen }) {
   const mine = shifts.filter((s) => s.claimedBy === me.id);
   const upcoming = mine.filter((s) => s.status === "confirmed" || s.status === "pending").sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
@@ -836,6 +954,8 @@ function StaffMyShiftsPage({ shifts, me, onOpen }) {
         <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>My shifts</h1>
         <p className="text-sm mt-0.5" style={{ color: C.slate }}>Your claimed and past shifts</p>
       </div>
+
+      <HoursPaySummary shifts={shifts} me={me} />
 
       <div>
         <h2 className="text-sm font-semibold mb-2" style={{ color: C.ink }}>Upcoming ({upcoming.length})</h2>
@@ -1797,6 +1917,56 @@ function ManagerCompaniesPage({ companies, onAddCompany }) {
   );
 }
 
+// Manager view — company-wide total plus a per-staff breakdown for a chosen
+// period, so hours/pay can be sanity-checked or used for payroll prep.
+function ManagerHoursPayPage({ shifts, staff }) {
+  const [mode, setMode] = useState("week");
+  const [anchor, setAnchor] = useState(new Date());
+  const { start, end } = getPeriodRange(anchor, mode);
+  const company = summarizeHoursAndPay(shifts, { start, end });
+  const perStaff = staff
+    .map((s) => ({ ...s, ...summarizeHoursAndPay(shifts, { start, end, staffId: s.id }) }))
+    .filter((s) => s.hours > 0)
+    .sort((a, b) => b.pay - a.pay);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Hours & pay</h1>
+        <p className="text-sm mt-0.5" style={{ color: C.slate }}>Confirmed shifts that have already happened.</p>
+      </div>
+
+      <div className="bg-white rounded-xl border p-4 space-y-3" style={{ borderColor: C.border }}>
+        <PeriodPicker mode={mode} setMode={setMode} anchor={anchor} setAnchor={setAnchor} />
+        <div className="grid grid-cols-2 gap-3 pt-1">
+          <div>
+            <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Company hours</div>
+            <div className="f-mono text-xl font-semibold" style={{ color: C.ink }}>{company.hours.toFixed(1)}</div>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Company pay</div>
+            <div className="f-mono text-xl font-semibold" style={{ color: C.pine }}>£{company.pay.toFixed(2)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <h2 className="text-sm font-semibold" style={{ color: C.ink }}>By staff member</h2>
+        {perStaff.map((s) => (
+          <div key={s.id} className="bg-white rounded-xl border p-3 flex items-center justify-between" style={{ borderColor: C.border }}>
+            <div className="text-sm font-medium" style={{ color: C.ink }}>{s.name}</div>
+            <div className="flex items-center gap-4 text-sm">
+              <span style={{ color: C.slate }}>{s.hours.toFixed(1)} hrs</span>
+              <span className="f-mono font-semibold" style={{ color: C.pine }}>£{s.pay.toFixed(2)}</span>
+            </div>
+          </div>
+        ))}
+        {perStaff.length === 0 && <div className="text-center py-8 text-sm" style={{ color: C.slate }}>No completed shifts in this period yet.</div>}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------- MANAGER APP SHELL ---------------------------------- */
 
 function ManagerApp({ shifts, staff, activity, managerName, isSuperAdmin, companies, onNewShift, onCancelShift, onReinstateShift, onDecide, onDecideHandback, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails, onRemoveStaff, onRestoreStaff, onAddCompany }) {
@@ -1809,6 +1979,7 @@ function ManagerApp({ shifts, staff, activity, managerName, isSuperAdmin, compan
     { id: "shifts", label: "Shifts", icon: CalendarClock },
     { id: "approvals", label: "Approvals", icon: BadgeCheck, badge: pendingCount },
     { id: "staff", label: "Staff", icon: Users },
+    { id: "hours", label: "Hours & Pay", icon: Clock },
     ...(isSuperAdmin ? [{ id: "companies", label: "Companies", icon: Building2 }] : []),
   ];
 
@@ -1828,6 +1999,7 @@ function ManagerApp({ shifts, staff, activity, managerName, isSuperAdmin, compan
         {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} onReinstate={onReinstateShift} />}
         {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} onDecideHandback={onDecideHandback} />}
         {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} onToggleTraining={onToggleTraining} onEditDetails={onEditDetails} onRemoveStaff={onRemoveStaff} onRestoreStaff={onRestoreStaff} />}
+        {tab === "hours" && <ManagerHoursPayPage shifts={shifts} staff={staff} />}
         {tab === "companies" && isSuperAdmin && <ManagerCompaniesPage companies={companies} onAddCompany={onAddCompany} />}
       </div>
 
