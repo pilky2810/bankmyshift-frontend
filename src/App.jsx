@@ -214,6 +214,7 @@ const normalizeStaffListItem = (u) => {
     phone: u.phone || "—",
     email: u.email,
     bankApproved: u.bank_approved,
+    status: u.status,
     gender: u.gender || null,
     hasDrivingLicence: !!u.has_driving_licence,
     skills,
@@ -316,6 +317,22 @@ function ConfirmModal({ title, message, confirmLabel = "Confirm", danger = true,
             {busy ? "Working…" : confirmLabel}
           </Button>
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Simple acknowledgement popup — used to give a clear "yes, that worked" moment
+// after a claim, rather than relying on the corner toast alone.
+function SuccessModal({ title, message, onClose }) {
+  return (
+    <Modal title={title} onClose={onClose}>
+      <div className="space-y-4 text-center">
+        <div className="w-14 h-14 rounded-full mx-auto flex items-center justify-center" style={{ backgroundColor: C.sageTint }}>
+          <CheckCircle2 size={28} color={C.sage} />
+        </div>
+        <p className="text-sm" style={{ color: C.ink }}>{message}</p>
+        <Button variant="primary" full onClick={onClose}>Got it</Button>
       </div>
     </Modal>
   );
@@ -893,6 +910,7 @@ function StaffProfilePage({ me }) {
 function StaffApp({ shifts, me, notifs, onClaim, onCancelClaim, onHandback, onRead }) {
   const [tab, setTab] = useState("shifts");
   const [openShift, setOpenShift] = useState(null);
+  const [claimedShift, setClaimedShift] = useState(null);
   const unread = notifs.filter((n) => !n.read).length;
 
   const TABS = [
@@ -927,9 +945,25 @@ function StaffApp({ shifts, me, notifs, onClaim, onCancelClaim, onHandback, onRe
           me={me}
           allShifts={shifts}
           onClose={() => setOpenShift(null)}
-          onClaim={(s) => { onClaim(s); setOpenShift(null); }}
+          onClaim={async (s) => {
+            setOpenShift(null);
+            const ok = await onClaim(s);
+            if (ok) setClaimedShift(s);
+          }}
           onCancelClaim={(s) => { onCancelClaim(s); setOpenShift(null); }}
           onHandback={(s) => { onHandback(s); setOpenShift(null); }}
+        />
+      )}
+
+      {claimedShift && (
+        <SuccessModal
+          title="Shift claimed!"
+          message={
+            claimedShift.approvalRequired
+              ? `Your request for the ${formatDate(claimedShift.date)} shift at ${claimedShift.location} has been sent — your manager will review it shortly.`
+              : `You've successfully claimed the ${formatDate(claimedShift.date)} shift at ${claimedShift.location}.`
+          }
+          onClose={() => setClaimedShift(null)}
         />
       )}
     </div>
@@ -1510,12 +1544,18 @@ function EditStaffDetailsModal({ staffMember, onClose, onSave }) {
   );
 }
 
-function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails }) {
+function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails, onRemoveStaff, onRestoreStaff }) {
   const [showNew, setShowNew] = useState(false);
   const [trainingForId, setTrainingForId] = useState(null);
   const [editingId, setEditingId] = useState(null);
+  const [removingId, setRemovingId] = useState(null);
+  const [showRemoved, setShowRemoved] = useState(false);
   const trainingForStaff = staff.find((s) => s.id === trainingForId) || null;
   const editingStaff = staff.find((s) => s.id === editingId) || null;
+  const removingStaff = staff.find((s) => s.id === removingId) || null;
+
+  const active = staff.filter((s) => s.status !== "inactive");
+  const removed = staff.filter((s) => s.status === "inactive");
 
   return (
     <div className="space-y-4">
@@ -1524,7 +1564,7 @@ function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTrainin
         <Button icon={PlusCircle} onClick={() => setShowNew(true)} size="sm">Add staff</Button>
       </div>
       <div className="space-y-3">
-        {staff.map((s) => (
+        {active.map((s) => (
           <div key={s.id} className="bg-white rounded-xl border p-4" style={{ borderColor: C.border }}>
             <div className="flex items-start justify-between">
               <div>
@@ -1556,11 +1596,37 @@ function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTrainin
               <button onClick={() => setEditingId(s.id)} className="text-xs font-medium" style={{ color: C.pine }}>
                 Edit details
               </button>
+              <button onClick={() => setRemovingId(s.id)} className="text-xs font-medium" style={{ color: C.clay }}>
+                Remove
+              </button>
             </div>
           </div>
         ))}
-        {staff.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No staff yet — add your first one above.</div>}
+        {active.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No staff yet — add your first one above.</div>}
       </div>
+
+      {removed.length > 0 && (
+        <div className="pt-2">
+          <button onClick={() => setShowRemoved((v) => !v)} className="text-xs font-medium" style={{ color: C.slate }}>
+            {showRemoved ? "Hide" : "Show"} removed staff ({removed.length})
+          </button>
+          {showRemoved && (
+            <div className="space-y-2 mt-2.5">
+              {removed.map((s) => (
+                <div key={s.id} className="flex items-center justify-between rounded-xl border p-3" style={{ borderColor: C.border, backgroundColor: C.mist }}>
+                  <div>
+                    <div className="text-sm font-medium" style={{ color: C.slate }}>{s.name}</div>
+                    <div className="text-xs" style={{ color: C.slate }}>{s.role}</div>
+                  </div>
+                  <button onClick={() => onRestoreStaff(s.id)} className="text-xs font-medium" style={{ color: C.pine }}>
+                    Restore
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {showNew && <NewStaffModal onClose={() => setShowNew(false)} onCreate={onAddStaff} />}
       {trainingForStaff && (
@@ -1569,13 +1635,22 @@ function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTrainin
       {editingStaff && (
         <EditStaffDetailsModal staffMember={editingStaff} onClose={() => setEditingId(null)} onSave={onEditDetails} />
       )}
+      {removingStaff && (
+        <ConfirmModal
+          title="Remove this staff member?"
+          message={`${removingStaff.name} will no longer be able to log in or claim shifts. Their shift history and training records are kept, and you can restore them at any time from "Show removed staff" below.`}
+          confirmLabel="Remove staff"
+          onConfirm={() => onRemoveStaff(removingStaff.id)}
+          onClose={() => setRemovingId(null)}
+        />
+      )}
     </div>
   );
 }
 
 /* ---------------------------------- MANAGER APP SHELL ---------------------------------- */
 
-function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onReinstateShift, onDecide, onDecideHandback, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails }) {
+function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onReinstateShift, onDecide, onDecideHandback, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails, onRemoveStaff, onRestoreStaff }) {
   const [tab, setTab] = useState("dashboard");
   const [showNew, setShowNew] = useState(false);
   const pendingCount = shifts.filter((s) => s.status === "pending" || s.status === "handback_requested").length;
@@ -1602,7 +1677,7 @@ function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancel
         {tab === "dashboard" && <ManagerDashboard shifts={shifts} staff={staff} activity={activity} managerName={managerName} goShifts={() => setTab("shifts")} goApprovals={() => setTab("approvals")} />}
         {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} onReinstate={onReinstateShift} />}
         {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} onDecideHandback={onDecideHandback} />}
-        {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} onToggleTraining={onToggleTraining} onEditDetails={onEditDetails} />}
+        {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} onToggleTraining={onToggleTraining} onEditDetails={onEditDetails} onRemoveStaff={onRemoveStaff} onRestoreStaff={onRestoreStaff} />}
       </div>
 
       {showNew && <NewShiftModal onClose={() => setShowNew(false)} onCreate={(data) => { onNewShift(data); setShowNew(false); }} />}
@@ -1784,15 +1859,19 @@ export default function App() {
     setActivity([]);
   };
 
+  // Returns true/false so the caller (the shift detail modal) knows whether to
+  // show the "claimed successfully" popup — errors are still surfaced via the
+  // usual toast here, so the caller doesn't need its own error handling.
   const handleClaim = async (shift) => {
     try {
       await apiRequest(`/shifts/${shift.id}/claim`, { method: "POST", token });
       await refreshShifts();
       await refreshNotifications();
       logActivity(`You ${shift.approvalRequired ? "requested" : "claimed"} ${shift.location} on ${formatDate(shift.date)}.`);
-      flash(shift.approvalRequired ? "Request sent — awaiting manager approval" : "Shift confirmed");
+      return true;
     } catch (err) {
       flash(err.message || "Couldn't claim this shift.");
+      return false;
     }
   };
 
@@ -1964,6 +2043,27 @@ export default function App() {
     await refreshStaffDirectory();
   };
 
+  const handleRemoveStaff = async (staffId) => {
+    try {
+      await apiRequest(`/staff/${staffId}`, { method: "DELETE", token });
+      await refreshStaffDirectory();
+      logActivity(`You removed a staff member from the directory.`);
+      flash("Staff member removed");
+    } catch (err) {
+      flash(err.message || "Couldn't remove this staff member.");
+    }
+  };
+
+  const handleRestoreStaff = async (staffId) => {
+    try {
+      await apiRequest(`/staff/${staffId}/restore`, { method: "POST", token });
+      await refreshStaffDirectory();
+      flash("Staff member restored");
+    } catch (err) {
+      flash(err.message || "Couldn't restore this staff member.");
+    }
+  };
+
   if (API_NOT_CONFIGURED) {
     return (
       <div className="w-full h-screen flex items-center justify-center px-6" style={{ backgroundColor: C.pine }}>
@@ -2022,7 +2122,7 @@ export default function App() {
           <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onHandback={handleHandback} onRead={handleRead} />
         )}
         {!loadingData && (currentUser.role === "manager" || currentUser.role === "admin") && (
-          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onReinstateShift={handleReinstateShift} onDecide={handleDecide} onDecideHandback={handleDecideHandback} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} />
+          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onReinstateShift={handleReinstateShift} onDecide={handleDecide} onDecideHandback={handleDecideHandback} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} onRemoveStaff={handleRemoveStaff} onRestoreStaff={handleRestoreStaff} />
         )}
       </div>
 
