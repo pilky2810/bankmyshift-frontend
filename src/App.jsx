@@ -164,6 +164,8 @@ const normalizeShift = (s) => ({
   notes: s.notes || "",
   mileage: s.mileage_note || "",
   approvalRequired: s.approval_required,
+  driverRequired: !!s.driver_required,
+  requiredGender: s.required_gender || null,
   status: s.status,
   claimedBy: s.claimed_by,
 });
@@ -193,6 +195,8 @@ const normalizeMe = (profile) => {
     phone: profile.phone || "—",
     email: profile.email,
     bankApproved: profile.bank_approved,
+    gender: profile.gender || null,
+    hasDrivingLicence: !!profile.has_driving_licence,
     skills,
     expiring,
   };
@@ -209,6 +213,8 @@ const normalizeStaffListItem = (u) => {
     phone: u.phone || "—",
     email: u.email,
     bankApproved: u.bank_approved,
+    gender: u.gender || null,
+    hasDrivingLicence: !!u.has_driving_licence,
     skills,
     expiring,
   };
@@ -515,6 +521,12 @@ function ShiftCard({ shift, me, onOpen, compact }) {
                 {SKILL_LABEL[s] || s}
               </Pill>
             ))}
+            {shift.driverRequired && (
+              <Pill small color={C.slate} tint={C.mist}>Driver required</Pill>
+            )}
+            {shift.requiredGender && (
+              <Pill small color={C.slate} tint={C.mist}>{shift.requiredGender === "male" ? "Male" : "Female"} carer</Pill>
+            )}
           </div>
         )}
       </div>
@@ -530,7 +542,9 @@ function ShiftDetailModal({ shift, me, allShifts, onClose, onClaim, onCancelClai
   const myUpcoming = allShifts.filter((s) => s.claimedBy === me.id && (s.status === "confirmed" || s.status === "pending") && s.id !== shift.id);
   const conflict = myUpcoming.find((s) => overlaps(s, shift));
   const isMine = shift.claimedBy === me.id;
-  const canClaim = shift.status === "open" && missing.length === 0 && !conflict && me.bankApproved;
+  const driverBlocked = shift.driverRequired && !me.hasDrivingLicence;
+  const genderBlocked = !!shift.requiredGender && me.gender !== shift.requiredGender;
+  const canClaim = shift.status === "open" && missing.length === 0 && !conflict && me.bankApproved && !driverBlocked && !genderBlocked;
 
   return (
     <Modal title="Shift details" onClose={onClose}>
@@ -559,6 +573,18 @@ function ShiftDetailModal({ shift, me, allShifts, onClose, onClaim, onCancelClai
             <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Approval</div>
             <div style={{ color: C.ink }}>{shift.approvalRequired ? "Manager approval required" : "Auto-confirmed on claim"}</div>
           </div>
+          {shift.driverRequired && (
+            <div>
+              <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Transport</div>
+              <div style={{ color: C.ink }}>Driver with own transport required</div>
+            </div>
+          )}
+          {shift.requiredGender && (
+            <div>
+              <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Carer requirement</div>
+              <div style={{ color: C.ink }}>{shift.requiredGender === "male" ? "Male carer" : "Female carer"} requested</div>
+            </div>
+          )}
         </div>
 
         {shift.mileage && (
@@ -596,6 +622,18 @@ function ShiftDetailModal({ shift, me, allShifts, onClose, onClaim, onCancelClai
           <div className="flex items-start gap-2 text-sm p-3 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
             <AlertTriangle size={16} className="mt-0.5 shrink-0" />
             This overlaps with your shift at {conflict.location} on {formatDate(conflict.date)}.
+          </div>
+        )}
+        {driverBlocked && shift.status === "open" && (
+          <div className="flex items-start gap-2 text-sm p-3 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+            This shift requires a driver with their own transport.
+          </div>
+        )}
+        {genderBlocked && shift.status === "open" && (
+          <div className="flex items-start gap-2 text-sm p-3 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+            This shift requires a {shift.requiredGender === "male" ? "male" : "female"} carer.
           </div>
         )}
 
@@ -842,6 +880,7 @@ function NewShiftModal({ onClose, onCreate }) {
   const [form, setForm] = useState({
     date: "2026-07-20", start: "07:00", end: "14:30", location: "Willowbrook House",
     serviceType: "Residential Care", payRate: "14.50", requiredSkills: [], notes: "", mileage: "", approvalRequired: false,
+    driverRequired: false, requiredGender: "",
   });
   const toggleSkill = (s) => setForm((f) => ({ ...f, requiredSkills: f.requiredSkills.includes(s) ? f.requiredSkills.filter((x) => x !== s) : [...f.requiredSkills, s] }));
 
@@ -903,6 +942,26 @@ function NewShiftModal({ onClose, onCreate }) {
           <label className="text-xs font-medium" style={{ color: C.slate }}>Mileage / travel note (optional)</label>
           <input value={form.mileage} onChange={(e) => setForm({ ...form, mileage: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }} />
         </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <label className="flex items-center gap-2 text-sm pt-1" style={{ color: C.ink }}>
+            <input type="checkbox" checked={form.driverRequired} onChange={(e) => setForm({ ...form, driverRequired: e.target.checked })} />
+            Driver with own transport required
+          </label>
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Carer requirement (optional)</label>
+            <select value={form.requiredGender} onChange={(e) => setForm({ ...form, requiredGender: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }}>
+              <option value="">No requirement</option>
+              <option value="female">Female carer</option>
+              <option value="male">Male carer</option>
+            </select>
+          </div>
+        </div>
+        {form.requiredGender && (
+          <p className="text-xs" style={{ color: C.slate }}>
+            Only set this against a specific, documented reason (e.g. the client's dignity, cultural, or religious preference for personal care) — not a general preference. See your compliance guide.
+          </p>
+        )}
 
         <label className="flex items-center gap-2 text-sm pt-1" style={{ color: C.ink }}>
           <input type="checkbox" checked={form.approvalRequired} onChange={(e) => setForm({ ...form, approvalRequired: e.target.checked })} />
@@ -1100,6 +1159,7 @@ function NewStaffModal({ onClose, onCreate }) {
   const [form, setForm] = useState({
     firstName: "", lastName: "", email: "", phone: "", jobRole: "Support Worker",
     temporaryPassword: "", skills: [], approveImmediately: false,
+    gender: "", hasDrivingLicence: false,
   });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1206,6 +1266,24 @@ function NewStaffModal({ onClose, onCreate }) {
           </div>
         </div>
 
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium" style={{ color: C.slate }}>Gender (optional)</label>
+            <select value={form.gender} onChange={(e) => setForm({ ...form, gender: e.target.value })} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }}>
+              <option value="">Not specified</option>
+              <option value="female">Female</option>
+              <option value="male">Male</option>
+            </select>
+          </div>
+          <label className="flex items-center gap-2 text-sm pt-6" style={{ color: C.ink }}>
+            <input type="checkbox" checked={form.hasDrivingLicence} onChange={(e) => setForm({ ...form, hasDrivingLicence: e.target.checked })} />
+            Has driving licence / own transport
+          </label>
+        </div>
+        <p className="text-xs" style={{ color: C.slate }}>
+          Gender is only used to match shifts with a documented carer requirement — leave as "Not specified" unless relevant.
+        </p>
+
         <label className="flex items-center gap-2 text-sm pt-1" style={{ color: C.ink }}>
           <input type="checkbox" checked={form.approveImmediately} onChange={(e) => setForm({ ...form, approveImmediately: e.target.checked })} />
           Approve for bank shifts immediately
@@ -1279,10 +1357,58 @@ function EditTrainingModal({ staffMember, onClose, onToggle }) {
   );
 }
 
-function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTraining }) {
+function EditStaffDetailsModal({ staffMember, onClose, onSave }) {
+  const [gender, setGender] = useState(staffMember.gender || "");
+  const [hasDrivingLicence, setHasDrivingLicence] = useState(staffMember.hasDrivingLicence);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const handleSave = async () => {
+    setError(""); setBusy(true);
+    try {
+      await onSave(staffMember.id, gender || null, hasDrivingLicence);
+      onClose();
+    } catch (err) {
+      setError(err.message || "Couldn't save these details.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={`Edit details — ${staffMember.name}`} onClose={onClose}>
+      <div className="space-y-3.5">
+        <div>
+          <label className="text-xs font-medium" style={{ color: C.slate }}>Gender</label>
+          <select value={gender} onChange={(e) => setGender(e.target.value)} className="w-full mt-1 text-sm border rounded-md px-2 py-1.5" style={{ borderColor: C.border }}>
+            <option value="">Not specified</option>
+            <option value="female">Female</option>
+            <option value="male">Male</option>
+          </select>
+        </div>
+        <label className="flex items-center gap-2 text-sm" style={{ color: C.ink }}>
+          <input type="checkbox" checked={hasDrivingLicence} onChange={(e) => setHasDrivingLicence(e.target.checked)} />
+          Has driving licence / own transport
+        </label>
+
+        {error && (
+          <div className="flex items-center gap-1.5 text-xs p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+            <AlertCircle size={13} /> {error}
+          </div>
+        )}
+
+        <Button full disabled={busy} onClick={handleSave}>{busy ? "Saving…" : "Save"}</Button>
+      </div>
+    </Modal>
+  );
+}
+
+function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails }) {
   const [showNew, setShowNew] = useState(false);
   const [trainingForId, setTrainingForId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
   const trainingForStaff = staff.find((s) => s.id === trainingForId) || null;
+  const editingStaff = staff.find((s) => s.id === editingId) || null;
 
   return (
     <div className="space-y-4">
@@ -1297,6 +1423,9 @@ function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTrainin
               <div>
                 <div className="text-sm font-semibold" style={{ color: C.ink }}>{s.name}</div>
                 <div className="text-xs" style={{ color: C.slate }}>{s.role} · {s.phone}</div>
+                <div className="text-xs mt-0.5" style={{ color: C.slate }}>
+                  {s.gender ? (s.gender === "male" ? "Male" : "Female") : "Gender not specified"} · {s.hasDrivingLicence ? "Driver" : "Non-driver"}
+                </div>
               </div>
               <Pill small color={s.bankApproved ? C.sage : C.clay} tint={s.bankApproved ? C.sageTint : C.clayTint}>
                 {s.bankApproved ? "Approved" : "Pending"}
@@ -1310,12 +1439,15 @@ function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTrainin
               ))}
               {s.skills.length === 0 && <span className="text-xs" style={{ color: C.slate }}>No training on file</span>}
             </div>
-            <div className="flex items-center gap-3 mt-2.5">
+            <div className="flex items-center gap-3 mt-2.5 flex-wrap">
               <button onClick={() => onToggleApproval(s.id)} className="text-xs font-medium" style={{ color: C.pine }}>
                 {s.bankApproved ? "Suspend bank approval" : "Approve for bank shifts"}
               </button>
               <button onClick={() => setTrainingForId(s.id)} className="text-xs font-medium" style={{ color: C.pine }}>
                 Manage training
+              </button>
+              <button onClick={() => setEditingId(s.id)} className="text-xs font-medium" style={{ color: C.pine }}>
+                Edit details
               </button>
             </div>
           </div>
@@ -1327,13 +1459,16 @@ function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTrainin
       {trainingForStaff && (
         <EditTrainingModal staffMember={trainingForStaff} onClose={() => setTrainingForId(null)} onToggle={onToggleTraining} />
       )}
+      {editingStaff && (
+        <EditStaffDetailsModal staffMember={editingStaff} onClose={() => setEditingId(null)} onSave={onEditDetails} />
+      )}
     </div>
   );
 }
 
 /* ---------------------------------- MANAGER APP SHELL ---------------------------------- */
 
-function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onDecide, onToggleApproval, onAddStaff, onToggleTraining }) {
+function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onDecide, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails }) {
   const [tab, setTab] = useState("dashboard");
   const [showNew, setShowNew] = useState(false);
   const pendingCount = shifts.filter((s) => s.status === "pending").length;
@@ -1360,7 +1495,7 @@ function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancel
         {tab === "dashboard" && <ManagerDashboard shifts={shifts} staff={staff} activity={activity} managerName={managerName} goShifts={() => setTab("shifts")} goApprovals={() => setTab("approvals")} />}
         {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} />}
         {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} />}
-        {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} onToggleTraining={onToggleTraining} />}
+        {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} onToggleTraining={onToggleTraining} onEditDetails={onEditDetails} />}
       </div>
 
       {showNew && <NewShiftModal onClose={() => setShowNew(false)} onCreate={(data) => { onNewShift(data); setShowNew(false); }} />}
@@ -1590,6 +1725,8 @@ export default function App() {
           notes: data.notes || undefined,
           mileage_note: data.mileage || undefined,
           approval_required: data.approvalRequired,
+          driver_required: data.driverRequired,
+          required_gender: data.requiredGender || null,
         },
       });
       await refreshShifts();
@@ -1633,6 +1770,8 @@ export default function App() {
         phone: data.phone || undefined,
         jobRole: data.jobRole || undefined,
         temporaryPassword: data.temporaryPassword,
+        gender: data.gender || null,
+        hasDrivingLicence: data.hasDrivingLicence,
       },
     });
 
@@ -1676,6 +1815,12 @@ export default function App() {
     } else {
       await apiRequest(`/staff/${staffId}/training/${encodeURIComponent(skill)}`, { method: "DELETE", token });
     }
+    await refreshStaffDirectory();
+  };
+
+  // Used by EditStaffDetailsModal — same propagate-the-error pattern as above.
+  const handleEditDetails = async (staffId, gender, hasDrivingLicence) => {
+    await apiRequest(`/staff/${staffId}/details`, { method: "PATCH", token, body: { gender, hasDrivingLicence } });
     await refreshStaffDirectory();
   };
 
@@ -1737,7 +1882,7 @@ export default function App() {
           <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onRead={handleRead} />
         )}
         {!loadingData && (currentUser.role === "manager" || currentUser.role === "admin") && (
-          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} />
+          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} />
         )}
       </div>
 
