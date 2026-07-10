@@ -1345,7 +1345,7 @@ function NewStaffModal({ onClose, onCreate }) {
           <div className="w-11 h-11 rounded-full flex items-center justify-center mx-auto" style={{ backgroundColor: C.sageTint }}>
             <CheckCircle2 size={22} color={C.sage} />
           </div>
-          <p className="text-sm" style={{ color: C.ink }}>Share these sign-in details with them directly — they aren't emailed automatically.</p>
+          <p className="text-sm" style={{ color: C.ink }}>An email with these sign-in details has been sent to them. Keep a copy here too, in case they don't receive it.</p>
           <div className="bg-white border rounded-lg p-3 text-left" style={{ borderColor: C.border }}>
             <div className="text-xs" style={{ color: C.slate }}>Email</div>
             <div className="text-sm f-mono" style={{ color: C.ink }}>{created.email}</div>
