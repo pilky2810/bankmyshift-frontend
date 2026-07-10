@@ -168,19 +168,24 @@ const normalizeShift = (s) => ({
   claimedBy: s.claimed_by,
 });
 
-const normalizeMe = (profile) => {
-  const training = profile.training || [];
+const deriveSkillsFromTraining = (training) => {
+  const list = training || [];
   const today = new Date();
-  const skills = training
+  const skills = list
     .filter((t) => !t.expiry_date || new Date(t.expiry_date) >= today)
     .map((t) => t.training_type);
-  const expiring = training
+  const expiring = list
     .filter((t) => {
       if (!t.expiry_date) return false;
       const days = (new Date(t.expiry_date) - today) / 86400000;
       return days >= 0 && days <= EXPIRY_WARNING_DAYS;
     })
     .map((t) => t.training_type);
+  return { skills, expiring };
+};
+
+const normalizeMe = (profile) => {
+  const { skills, expiring } = deriveSkillsFromTraining(profile.training);
   return {
     id: profile.id,
     name: `${profile.first_name} ${profile.last_name}`,
@@ -193,19 +198,21 @@ const normalizeMe = (profile) => {
   };
 };
 
-// GET /staff (the directory) doesn't include training_records, so skills/expiring
-// are left empty here — only /staff/me returns them. Worth adding to the API
-// later if the staff directory should show training status per person.
-const normalizeStaffListItem = (u) => ({
-  id: u.id,
-  name: `${u.first_name} ${u.last_name}`,
-  role: u.job_role || "Staff",
-  phone: u.phone || "—",
-  email: u.email,
-  bankApproved: u.bank_approved,
-  skills: [],
-  expiring: [],
-});
+// GET /staff now includes each person's training records alongside the basic
+// profile fields, so this mirrors normalizeMe's skills/expiring derivation.
+const normalizeStaffListItem = (u) => {
+  const { skills, expiring } = deriveSkillsFromTraining(u.training);
+  return {
+    id: u.id,
+    name: `${u.first_name} ${u.last_name}`,
+    role: u.job_role || "Staff",
+    phone: u.phone || "—",
+    email: u.email,
+    bankApproved: u.bank_approved,
+    skills,
+    expiring,
+  };
+};
 
 const normalizeNotification = (n) => ({
   id: n.id,
@@ -1216,8 +1223,67 @@ function NewStaffModal({ onClose, onCreate }) {
   );
 }
 
-function ManagerStaffPage({ staff, onToggleApproval, onAddStaff }) {
+function EditTrainingModal({ staffMember, onClose, onToggle }) {
+  const [busy, setBusy] = useState(null); // skill code currently being toggled
+  const [error, setError] = useState("");
+
+  const handleToggle = async (skill, has) => {
+    setBusy(skill);
+    setError("");
+    try {
+      await onToggle(staffMember.id, skill, !has);
+    } catch (err) {
+      setError(err.message || "Couldn't update training.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Modal title={`Training — ${staffMember.name}`} onClose={onClose}>
+      <div className="space-y-3">
+        <p className="text-sm" style={{ color: C.slate }}>Tick what they currently hold. Unticking removes the record.</p>
+        <div className="flex flex-wrap gap-1.5">
+          {SKILLS.map((s) => {
+            const has = staffMember.skills.includes(s);
+            const expiring = staffMember.expiring.includes(s);
+            return (
+              <button
+                key={s}
+                type="button"
+                disabled={busy === s}
+                onClick={() => handleToggle(s, has)}
+                className="text-xs px-2.5 py-1 rounded-full font-medium border disabled:opacity-50"
+                style={{
+                  borderColor: has ? (expiring ? C.amber : C.pine) : C.border,
+                  backgroundColor: has ? (expiring ? C.amberTint : C.pineTint) : "white",
+                  color: has ? (expiring ? C.amber : C.pine) : C.slate,
+                }}
+              >
+                {has ? <ShieldCheck size={11} className="inline mr-1 -mt-0.5" /> : null}
+                {SKILL_LABEL[s]}{expiring ? " · expiring" : ""}
+              </button>
+            );
+          })}
+        </div>
+
+        {error && (
+          <div className="flex items-center gap-1.5 text-xs p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+            <AlertCircle size={13} /> {error}
+          </div>
+        )}
+
+        <Button full onClick={onClose}>Done</Button>
+      </div>
+    </Modal>
+  );
+}
+
+function ManagerStaffPage({ staff, onToggleApproval, onAddStaff, onToggleTraining }) {
   const [showNew, setShowNew] = useState(false);
+  const [trainingForId, setTrainingForId] = useState(null);
+  const trainingForStaff = staff.find((s) => s.id === trainingForId) || null;
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -1242,23 +1308,32 @@ function ManagerStaffPage({ staff, onToggleApproval, onAddStaff }) {
                   {SKILL_LABEL[sk]}{s.expiring.includes(sk) ? " · expiring" : ""}
                 </Pill>
               ))}
+              {s.skills.length === 0 && <span className="text-xs" style={{ color: C.slate }}>No training on file</span>}
             </div>
-            <button onClick={() => onToggleApproval(s.id)} className="text-xs font-medium mt-2.5" style={{ color: C.pine }}>
-              {s.bankApproved ? "Suspend bank approval" : "Approve for bank shifts"}
-            </button>
+            <div className="flex items-center gap-3 mt-2.5">
+              <button onClick={() => onToggleApproval(s.id)} className="text-xs font-medium" style={{ color: C.pine }}>
+                {s.bankApproved ? "Suspend bank approval" : "Approve for bank shifts"}
+              </button>
+              <button onClick={() => setTrainingForId(s.id)} className="text-xs font-medium" style={{ color: C.pine }}>
+                Manage training
+              </button>
+            </div>
           </div>
         ))}
         {staff.length === 0 && <div className="text-center py-10 text-sm" style={{ color: C.slate }}>No staff yet — add your first one above.</div>}
       </div>
 
       {showNew && <NewStaffModal onClose={() => setShowNew(false)} onCreate={onAddStaff} />}
+      {trainingForStaff && (
+        <EditTrainingModal staffMember={trainingForStaff} onClose={() => setTrainingForId(null)} onToggle={onToggleTraining} />
+      )}
     </div>
   );
 }
 
 /* ---------------------------------- MANAGER APP SHELL ---------------------------------- */
 
-function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onDecide, onToggleApproval, onAddStaff }) {
+function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancelShift, onDecide, onToggleApproval, onAddStaff, onToggleTraining }) {
   const [tab, setTab] = useState("dashboard");
   const [showNew, setShowNew] = useState(false);
   const pendingCount = shifts.filter((s) => s.status === "pending").length;
@@ -1285,7 +1360,7 @@ function ManagerApp({ shifts, staff, activity, managerName, onNewShift, onCancel
         {tab === "dashboard" && <ManagerDashboard shifts={shifts} staff={staff} activity={activity} managerName={managerName} goShifts={() => setTab("shifts")} goApprovals={() => setTab("approvals")} />}
         {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} />}
         {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} />}
-        {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} />}
+        {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} onToggleTraining={onToggleTraining} />}
       </div>
 
       {showNew && <NewShiftModal onClose={() => setShowNew(false)} onCreate={(data) => { onNewShift(data); setShowNew(false); }} />}
@@ -1593,6 +1668,17 @@ export default function App() {
     }
   };
 
+  // Used by EditTrainingModal — errors are left to propagate so the modal can show
+  // them inline next to the specific skill being toggled, rather than a toast.
+  const handleToggleTraining = async (staffId, skill, add) => {
+    if (add) {
+      await apiRequest(`/staff/${staffId}/training`, { method: "POST", token, body: { trainingType: skill } });
+    } else {
+      await apiRequest(`/staff/${staffId}/training/${encodeURIComponent(skill)}`, { method: "DELETE", token });
+    }
+    await refreshStaffDirectory();
+  };
+
   if (API_NOT_CONFIGURED) {
     return (
       <div className="w-full h-screen flex items-center justify-center px-6" style={{ backgroundColor: C.pine }}>
@@ -1651,7 +1737,7 @@ export default function App() {
           <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onRead={handleRead} />
         )}
         {!loadingData && (currentUser.role === "manager" || currentUser.role === "admin") && (
-          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} />
+          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onDecide={handleDecide} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} />
         )}
       </div>
 
