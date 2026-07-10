@@ -4,7 +4,7 @@ import {
   PlusCircle, AlertTriangle, ChevronRight, ChevronLeft, Search, ShieldCheck, ShieldAlert,
   LogIn, LogOut, X, Users, LayoutDashboard, ClipboardList, CalendarClock,
   BadgeCheck, Ban, ChevronDown, Activity, MapPinned, Lock, Mail, Eye, EyeOff,
-  AlertCircle, Building2
+  AlertCircle, Building2, Settings
 } from "lucide-react";
 
 /* ---------------------------------- THEME ---------------------------------- */
@@ -158,26 +158,48 @@ const mondayOf = (date) => {
   return d;
 };
 
-// A fixed Monday used only to keep 4-week blocks stable and non-overlapping as
-// you page back and forth — 1 Jan 2024 was a Monday.
-const FOUR_WEEK_ANCHOR = mondayOf(new Date("2024-01-01T00:00:00"));
+// A fixed Monday used only to keep week-based blocks stable and non-overlapping
+// as you page back and forth — 1 Jan 2024 was a Monday.
+const PAY_PERIOD_ANCHOR = mondayOf(new Date("2024-01-01T00:00:00"));
 
-// Returns the { start, end } (end exclusive) Date range for the week or 4-week
-// block containing `anchorDate`.
-const getPeriodRange = (anchorDate, mode) => {
-  const weekStart = mondayOf(anchorDate);
-  if (mode === "week") {
-    const end = new Date(weekStart);
-    end.setDate(end.getDate() + 7);
-    return { start: weekStart, end };
+const PAY_PERIOD_WEEKS = { weekly: 1, biweekly: 2, four_weekly: 4 };
+const PAY_PERIOD_LABELS = { weekly: "Weekly", biweekly: "Biweekly", four_weekly: "4-weekly", monthly: "Monthly" };
+
+// Returns the { start, end } (end exclusive) Date range for the pay period
+// containing `anchorDate`, per the company's configured payPeriodType. Weekly/
+// biweekly/four-weekly are all fixed-length week-blocks anchored to a stable
+// reference Monday; monthly is calendar-month based (varies in length), so it's
+// handled separately.
+const getPeriodRange = (anchorDate, payPeriodType) => {
+  if (payPeriodType === "monthly") {
+    const d = new Date(anchorDate);
+    const start = new Date(d.getFullYear(), d.getMonth(), 1);
+    const end = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+    return { start, end };
   }
-  const diffWeeks = Math.round((weekStart - FOUR_WEEK_ANCHOR) / (7 * 24 * 60 * 60 * 1000));
-  const blockIndex = Math.floor(diffWeeks / 4);
-  const start = new Date(FOUR_WEEK_ANCHOR);
-  start.setDate(start.getDate() + blockIndex * 28);
+  const weeks = PAY_PERIOD_WEEKS[payPeriodType] || 1;
+  const weekStart = mondayOf(anchorDate);
+  const diffWeeks = Math.round((weekStart - PAY_PERIOD_ANCHOR) / (7 * 24 * 60 * 60 * 1000));
+  const blockIndex = Math.floor(diffWeeks / weeks);
+  const start = new Date(PAY_PERIOD_ANCHOR);
+  start.setDate(start.getDate() + blockIndex * weeks * 7);
   const end = new Date(start);
-  end.setDate(end.getDate() + 28);
+  end.setDate(end.getDate() + weeks * 7);
   return { start, end };
+};
+
+// Moves `anchorDate` to the previous/next pay period of the same type. Monthly
+// steps by a whole calendar month; the others step by a fixed number of days.
+const shiftPeriodAnchor = (anchorDate, payPeriodType, direction) => {
+  const d = new Date(anchorDate);
+  if (payPeriodType === "monthly") {
+    d.setDate(1); // avoid month-length overflow (e.g. 31 Jan + 1 month)
+    d.setMonth(d.getMonth() + direction);
+    return d;
+  }
+  const weeks = PAY_PERIOD_WEEKS[payPeriodType] || 1;
+  d.setDate(d.getDate() + direction * weeks * 7);
+  return d;
 };
 
 // Sums hours + pay for confirmed shifts that have already happened, within
@@ -889,26 +911,28 @@ function StaffShiftsPage({ shifts, me, onOpen }) {
 
 // Week/4-week toggle with prev/next navigation — shared by the staff and manager
 // hours & pay views so browsing periods behaves identically in both places.
-function PeriodPicker({ mode, setMode, anchor, setAnchor }) {
-  const { start, end } = getPeriodRange(anchor, mode);
+// Shows the current pay period (per the company's configured cadence — weekly,
+// biweekly, 4-weekly, or monthly) with prev/next navigation. The cadence itself
+// isn't chosen here — see the manager Settings tab — this just browses periods
+// of whatever cadence is already set.
+function PeriodPicker({ payPeriodType, anchor, setAnchor }) {
+  const { start, end } = getPeriodRange(anchor, payPeriodType);
   const displayEnd = new Date(end);
   displayEnd.setDate(displayEnd.getDate() - 1);
-  const label = `${start.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} – ${displayEnd.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}`;
-  const step = mode === "week" ? 7 : 28;
-  const shift = (delta) => setAnchor((a) => { const d = new Date(a); d.setDate(d.getDate() + delta); return d; });
+  const label = payPeriodType === "monthly"
+    ? start.toLocaleDateString("en-GB", { month: "long", year: "numeric" })
+    : `${start.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} – ${displayEnd.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}`;
+  const shift = (direction) => setAnchor((a) => shiftPeriodAnchor(a, payPeriodType, direction));
 
   return (
     <div className="flex items-center justify-between gap-2 flex-wrap">
-      <div className="flex rounded-lg border overflow-hidden shrink-0" style={{ borderColor: C.border }}>
-        <button onClick={() => setMode("week")} className="text-xs font-medium px-2.5 py-1.5" style={{ backgroundColor: mode === "week" ? C.pine : "white", color: mode === "week" ? "white" : C.slate }}>Weekly</button>
-        <button onClick={() => setMode("4week")} className="text-xs font-medium px-2.5 py-1.5" style={{ backgroundColor: mode === "4week" ? C.pine : "white", color: mode === "4week" ? "white" : C.slate }}>4-weekly</button>
-      </div>
+      <Pill small color={C.pine} tint={C.pineTint}>{PAY_PERIOD_LABELS[payPeriodType] || "Weekly"} pay period</Pill>
       <div className="flex items-center gap-1.5">
-        <button onClick={() => shift(-step)} className="p-1.5 rounded-md border" style={{ borderColor: C.border }}>
+        <button onClick={() => shift(-1)} className="p-1.5 rounded-md border" style={{ borderColor: C.border }}>
           <ChevronLeft size={14} color={C.slate} />
         </button>
         <span className="text-xs font-medium f-mono whitespace-nowrap" style={{ color: C.ink }}>{label}</span>
-        <button onClick={() => shift(step)} className="p-1.5 rounded-md border" style={{ borderColor: C.border }}>
+        <button onClick={() => shift(1)} className="p-1.5 rounded-md border" style={{ borderColor: C.border }}>
           <ChevronRight size={14} color={C.slate} />
         </button>
         <button onClick={() => setAnchor(new Date())} className="text-xs font-medium ml-1" style={{ color: C.pine }}>Today</button>
@@ -917,18 +941,17 @@ function PeriodPicker({ mode, setMode, anchor, setAnchor }) {
   );
 }
 
-// Staff self-service summary — hours worked and pay earned for a chosen period,
-// counting only confirmed shifts that have already happened.
-function HoursPaySummary({ shifts, me }) {
-  const [mode, setMode] = useState("week");
+// Staff self-service summary — hours worked and pay earned for the current pay
+// period, counting only confirmed shifts that have already happened.
+function HoursPaySummary({ shifts, me, payPeriodType }) {
   const [anchor, setAnchor] = useState(new Date());
-  const { start, end } = getPeriodRange(anchor, mode);
+  const { start, end } = getPeriodRange(anchor, payPeriodType);
   const { hours, pay } = summarizeHoursAndPay(shifts, { start, end, staffId: me.id });
 
   return (
     <div className="bg-white rounded-xl border p-4 space-y-3" style={{ borderColor: C.border }}>
       <h2 className="text-sm font-semibold" style={{ color: C.ink }}>Hours & pay</h2>
-      <PeriodPicker mode={mode} setMode={setMode} anchor={anchor} setAnchor={setAnchor} />
+      <PeriodPicker payPeriodType={payPeriodType} anchor={anchor} setAnchor={setAnchor} />
       <div className="grid grid-cols-2 gap-3 pt-1">
         <div>
           <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Hours worked</div>
@@ -943,7 +966,7 @@ function HoursPaySummary({ shifts, me }) {
   );
 }
 
-function StaffMyShiftsPage({ shifts, me, onOpen }) {
+function StaffMyShiftsPage({ shifts, me, onOpen, payPeriodType }) {
   const mine = shifts.filter((s) => s.claimedBy === me.id);
   const upcoming = mine.filter((s) => s.status === "confirmed" || s.status === "pending").sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
   const past = mine.filter((s) => s.status === "completed" || s.status === "cancelled");
@@ -955,7 +978,7 @@ function StaffMyShiftsPage({ shifts, me, onOpen }) {
         <p className="text-sm mt-0.5" style={{ color: C.slate }}>Your claimed and past shifts</p>
       </div>
 
-      <HoursPaySummary shifts={shifts} me={me} />
+      <HoursPaySummary shifts={shifts} me={me} payPeriodType={payPeriodType} />
 
       <div>
         <h2 className="text-sm font-semibold mb-2" style={{ color: C.ink }}>Upcoming ({upcoming.length})</h2>
@@ -1043,7 +1066,7 @@ function StaffProfilePage({ me }) {
 
 /* ---------------------------------- STAFF APP SHELL ---------------------------------- */
 
-function StaffApp({ shifts, me, notifs, onClaim, onCancelClaim, onHandback, onRead }) {
+function StaffApp({ shifts, me, notifs, onClaim, onCancelClaim, onHandback, onRead, payPeriodType }) {
   const [tab, setTab] = useState("shifts");
   const [openShift, setOpenShift] = useState(null);
   const [claimedShift, setClaimedShift] = useState(null);
@@ -1060,7 +1083,7 @@ function StaffApp({ shifts, me, notifs, onClaim, onCancelClaim, onHandback, onRe
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto scrollbar-none px-4 pt-4 pb-24">
         {tab === "shifts" && <StaffShiftsPage shifts={shifts} me={me} onOpen={setOpenShift} />}
-        {tab === "mine" && <StaffMyShiftsPage shifts={shifts} me={me} onOpen={setOpenShift} />}
+        {tab === "mine" && <StaffMyShiftsPage shifts={shifts} me={me} onOpen={setOpenShift} payPeriodType={payPeriodType} />}
         {tab === "notifs" && <StaffNotificationsPage notifs={notifs} onRead={onRead} />}
         {tab === "profile" && <StaffProfilePage me={me} />}
       </div>
@@ -1919,10 +1942,9 @@ function ManagerCompaniesPage({ companies, onAddCompany }) {
 
 // Manager view — company-wide total plus a per-staff breakdown for a chosen
 // period, so hours/pay can be sanity-checked or used for payroll prep.
-function ManagerHoursPayPage({ shifts, staff }) {
-  const [mode, setMode] = useState("week");
+function ManagerHoursPayPage({ shifts, staff, payPeriodType }) {
   const [anchor, setAnchor] = useState(new Date());
-  const { start, end } = getPeriodRange(anchor, mode);
+  const { start, end } = getPeriodRange(anchor, payPeriodType);
   const company = summarizeHoursAndPay(shifts, { start, end });
   const perStaff = staff
     .map((s) => ({ ...s, ...summarizeHoursAndPay(shifts, { start, end, staffId: s.id }) }))
@@ -1937,7 +1959,7 @@ function ManagerHoursPayPage({ shifts, staff }) {
       </div>
 
       <div className="bg-white rounded-xl border p-4 space-y-3" style={{ borderColor: C.border }}>
-        <PeriodPicker mode={mode} setMode={setMode} anchor={anchor} setAnchor={setAnchor} />
+        <PeriodPicker payPeriodType={payPeriodType} anchor={anchor} setAnchor={setAnchor} />
         <div className="grid grid-cols-2 gap-3 pt-1">
           <div>
             <div className="text-xs uppercase tracking-wide" style={{ color: C.slate }}>Company hours</div>
@@ -1967,9 +1989,79 @@ function ManagerHoursPayPage({ shifts, staff }) {
   );
 }
 
+const PAY_PERIOD_OPTIONS = [
+  { value: "weekly", label: "Weekly", hint: "Every 7 days" },
+  { value: "biweekly", label: "Biweekly", hint: "Every 14 days" },
+  { value: "four_weekly", label: "4-weekly", hint: "Every 28 days" },
+  { value: "monthly", label: "Monthly", hint: "Calendar month" },
+];
+
+// Any manager/admin can set their own company's pay period cadence — this drives
+// how the "Hours & Pay" tab (and staff's own summary) groups totals.
+function ManagerSettingsPage({ payPeriodType, onSavePayPeriod }) {
+  const [selected, setSelected] = useState(payPeriodType);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSave = async () => {
+    setBusy(true);
+    setSaved(false);
+    setError("");
+    try {
+      await onSavePayPeriod(selected);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2400);
+    } catch (err) {
+      setError(err.message || "Couldn't update the pay period.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="f-display text-2xl font-semibold" style={{ color: C.ink }}>Settings</h1>
+        <p className="text-sm mt-0.5" style={{ color: C.slate }}>Company-wide preferences for your organisation.</p>
+      </div>
+
+      <div className="bg-white rounded-xl border p-4 space-y-3" style={{ borderColor: C.border }}>
+        <div>
+          <h2 className="text-sm font-semibold" style={{ color: C.ink }}>Pay period</h2>
+          <p className="text-xs mt-0.5" style={{ color: C.slate }}>
+            Controls how the "Hours & Pay" tab (and each staff member's own summary) groups their totals.
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {PAY_PERIOD_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setSelected(opt.value)}
+              className="text-left rounded-lg border px-3 py-2"
+              style={{ borderColor: selected === opt.value ? C.pine : C.border, backgroundColor: selected === opt.value ? C.pineTint : "white" }}
+            >
+              <div className="text-sm font-medium" style={{ color: selected === opt.value ? C.pine : C.ink }}>{opt.label}</div>
+              <div className="text-xs" style={{ color: C.slate }}>{opt.hint}</div>
+            </button>
+          ))}
+        </div>
+        {error && (
+          <div className="flex items-center gap-1.5 text-xs p-2 rounded-lg" style={{ backgroundColor: C.clayTint, color: C.clay }}>
+            <AlertCircle size={13} /> {error}
+          </div>
+        )}
+        <Button disabled={busy || selected === payPeriodType} onClick={handleSave}>
+          {busy ? "Saving…" : saved ? "Saved" : "Save pay period"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------- MANAGER APP SHELL ---------------------------------- */
 
-function ManagerApp({ shifts, staff, activity, managerName, isSuperAdmin, companies, onNewShift, onCancelShift, onReinstateShift, onDecide, onDecideHandback, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails, onRemoveStaff, onRestoreStaff, onAddCompany }) {
+function ManagerApp({ shifts, staff, activity, managerName, isSuperAdmin, companies, payPeriodType, onNewShift, onCancelShift, onReinstateShift, onDecide, onDecideHandback, onToggleApproval, onAddStaff, onToggleTraining, onEditDetails, onRemoveStaff, onRestoreStaff, onAddCompany, onSavePayPeriod }) {
   const [tab, setTab] = useState("dashboard");
   const [showNew, setShowNew] = useState(false);
   const pendingCount = shifts.filter((s) => s.status === "pending" || s.status === "handback_requested").length;
@@ -1980,6 +2072,7 @@ function ManagerApp({ shifts, staff, activity, managerName, isSuperAdmin, compan
     { id: "approvals", label: "Approvals", icon: BadgeCheck, badge: pendingCount },
     { id: "staff", label: "Staff", icon: Users },
     { id: "hours", label: "Hours & Pay", icon: Clock },
+    { id: "settings", label: "Settings", icon: Settings },
     ...(isSuperAdmin ? [{ id: "companies", label: "Companies", icon: Building2 }] : []),
   ];
 
@@ -1999,7 +2092,8 @@ function ManagerApp({ shifts, staff, activity, managerName, isSuperAdmin, compan
         {tab === "shifts" && <ManagerShiftsPage shifts={shifts} staff={staff} onNew={() => setShowNew(true)} onCancel={onCancelShift} onReinstate={onReinstateShift} />}
         {tab === "approvals" && <ManagerApprovalsPage shifts={shifts} staff={staff} onDecide={onDecide} onDecideHandback={onDecideHandback} />}
         {tab === "staff" && <ManagerStaffPage staff={staff} onToggleApproval={onToggleApproval} onAddStaff={onAddStaff} onToggleTraining={onToggleTraining} onEditDetails={onEditDetails} onRemoveStaff={onRemoveStaff} onRestoreStaff={onRestoreStaff} />}
-        {tab === "hours" && <ManagerHoursPayPage shifts={shifts} staff={staff} />}
+        {tab === "hours" && <ManagerHoursPayPage shifts={shifts} staff={staff} payPeriodType={payPeriodType} />}
+        {tab === "settings" && <ManagerSettingsPage payPeriodType={payPeriodType} onSavePayPeriod={onSavePayPeriod} />}
         {tab === "companies" && isSuperAdmin && <ManagerCompaniesPage companies={companies} onAddCompany={onAddCompany} />}
       </div>
 
@@ -2089,6 +2183,7 @@ export default function App() {
   const [shifts, setShifts] = useState([]);
   const [staff, setStaff] = useState([]);
   const [companies, setCompanies] = useState([]); // super admins only
+  const [payPeriodType, setPayPeriodType] = useState("weekly"); // this company's pay period cadence
   const [notifs, setNotifs] = useState([]);
   const [activity, setActivity] = useState([]);
   const [toast, setToast] = useState("");
@@ -2119,6 +2214,12 @@ export default function App() {
     const data = await apiRequest("/staff/me", { token: tok });
     setMe(normalizeMe(data));
   };
+  // Every role needs this — staff and managers alike group their "hours & pay"
+  // totals by the same company-wide cadence.
+  const refreshCompanySettings = async (tok = token) => {
+    const data = await apiRequest("/companies/mine", { token: tok });
+    setPayPeriodType(data.pay_period_type || "weekly");
+  };
 
   const loadForRole = async (role, tok, isSuperAdmin) => {
     setLoadingData(true);
@@ -2126,6 +2227,7 @@ export default function App() {
     try {
       await refreshShifts(tok);
       await refreshNotifications(tok);
+      await refreshCompanySettings(tok);
       if (role === "manager" || role === "admin") {
         await refreshStaffDirectory(tok);
         if (isSuperAdmin) await refreshCompanies(tok);
@@ -2411,6 +2513,14 @@ export default function App() {
     logActivity(`You added a new company: ${form.name}.`);
   };
 
+  // Errors left to propagate so ManagerSettingsPage can show them inline next to
+  // the Save button, rather than a toast — same pattern as the modals above.
+  const handleSavePayPeriod = async (newPayPeriodType) => {
+    await apiRequest("/companies/mine", { method: "PATCH", token, body: { payPeriodType: newPayPeriodType } });
+    setPayPeriodType(newPayPeriodType);
+    logActivity(`You changed the pay period to ${PAY_PERIOD_LABELS[newPayPeriodType] || newPayPeriodType}.`);
+  };
+
   if (API_NOT_CONFIGURED) {
     return (
       <div className="w-full h-screen flex items-center justify-center px-6" style={{ backgroundColor: C.pine }}>
@@ -2466,10 +2576,10 @@ export default function App() {
           <div className="m-4 p-3 rounded-lg text-sm" style={{ backgroundColor: C.clayTint, color: C.clay }}>{loadError}</div>
         )}
         {!loadingData && currentUser.role === "staff" && me && (
-          <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onHandback={handleHandback} onRead={handleRead} />
+          <StaffApp shifts={shifts} me={me} notifs={myNotifs} onClaim={handleClaim} onCancelClaim={handleCancelClaim} onHandback={handleHandback} onRead={handleRead} payPeriodType={payPeriodType} />
         )}
         {!loadingData && (currentUser.role === "manager" || currentUser.role === "admin") && (
-          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} isSuperAdmin={!!currentUser.isSuperAdmin} companies={companies} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onReinstateShift={handleReinstateShift} onDecide={handleDecide} onDecideHandback={handleDecideHandback} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} onRemoveStaff={handleRemoveStaff} onRestoreStaff={handleRestoreStaff} onAddCompany={handleCreateCompany} />
+          <ManagerApp shifts={shifts} staff={staff} activity={activity} managerName={displayName} isSuperAdmin={!!currentUser.isSuperAdmin} companies={companies} payPeriodType={payPeriodType} onNewShift={handleNewShift} onCancelShift={handleCancelShift} onReinstateShift={handleReinstateShift} onDecide={handleDecide} onDecideHandback={handleDecideHandback} onToggleApproval={handleToggleApproval} onAddStaff={handleAddStaff} onToggleTraining={handleToggleTraining} onEditDetails={handleEditDetails} onRemoveStaff={handleRemoveStaff} onRestoreStaff={handleRestoreStaff} onAddCompany={handleCreateCompany} onSavePayPeriod={handleSavePayPeriod} />
         )}
       </div>
 
